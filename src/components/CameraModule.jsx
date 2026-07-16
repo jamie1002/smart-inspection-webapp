@@ -20,8 +20,7 @@ const ORIENTATION_THROTTLE_MS = 150;
 const ORIENTATION_STABLE_SAMPLES = 1;
 
 // 模組 D：畫質檢驗相關設定（漸進式基準 EMA，避免單一雜訊尖峰讓基準暴衝）
-// 🔧 從 500 縮短到 200，讓「連續 2 次清晰」的判定週期從最壞 ~1.5~2 秒縮短到最壞 ~600ms，未經實機測試
-const LIVE_BLUR_CHECK_INTERVAL_MS = 300;
+const LIVE_BLUR_CHECK_INTERVAL_MS = 200;
 const LIVE_BLUR_SAMPLE_WIDTH = 160;
 const LIVE_BLUR_STABLE_SAMPLES = 2;
 const BLUR_BASELINE_MIN_SAMPLES = 4;
@@ -37,6 +36,21 @@ const VERTICAL_HINT_SIGN = 1;
 
 // 存檔輸出設定
 const MAX_OUTPUT_LONG_EDGE = 1920; // 只在超過此上限時等比例縮小，不放大
+
+// ============================================
+// 模組 E：自動快門與流程控制設定
+// ============================================
+// 🔧 可自行修改測試：五個對齊條件都通過後，要「連續穩定」多久才自動觸發快門
+const CAPTURE_STABLE_DURATION_MS = 1000;
+
+// 拍攝順序：左前 → 左後 → 右後 → 右前
+const POSITION_SEQUENCE = ["front_left", "left_rear", "right_rear", "right_front"];
+
+const FLOW_STAGE = {
+  SHOOTING: "shooting", // 取景/等待對齊/自動快門
+  PREVIEW: "preview",   // 剛拍完，等使用者確認保留或重拍
+  COMPLETE: "complete", // 四張都確認保留完成
+};
 
 const GUIDE_TEMPLATES = {
   front_left: {
@@ -68,12 +82,6 @@ const CAMERA_STATUS = {
   DENIED: "denied",
   UNSUPPORTED: "unsupported",
   ERROR: "error",
-};
-
-const CAPTURE_STATUS = {
-  IDLE: "idle",
-  CHECKING: "checking",
-  BLOCKED: "blocked",
 };
 
 function keyToTemplateField(key) {
@@ -147,7 +155,10 @@ function evaluatePositionAndDistance(rawResults, position) {
     candidates.push({ key, dx, dy, positionError, positionOk, areaRatio, areaError, areaOk });
   }
 
-  if (candidates.length === 0) return { positionHint: null, distanceHint: null };
+  // 未同時偵測到車牌與輪胎時，視為「尚未偵測到完整物件」，不計算位置/距離提示
+  if (candidates.length < CLASS_NAMES.length) {
+    return { positionHint: null, distanceHint: null, incomplete: true };
+  }
 
   let distanceHint = null;
   const misalignedByArea = candidates.filter((c) => !c.areaOk);
@@ -185,7 +196,7 @@ function evaluatePositionAndDistance(rawResults, position) {
     }
   }
 
-  return { positionHint, distanceHint };
+  return { positionHint, distanceHint, incomplete: false };
 }
 
 // 手刻輕量版 Laplacian 模糊分數計算
@@ -259,7 +270,6 @@ function DirectionArrow({ direction }) {
 }
 
 // 嘗試鎖定對焦（不碰 zoom，避免 iOS 被迫切換到超廣角/微距鏡頭）
-// ⚠️ 目前維持鎖定，之後若發現搭配距離提示移動時容易因真的失焦而卡住快門，考慮拿掉或改成快門瞬間才鎖定
 async function tryLockFocus(stream) {
   const track = stream.getVideoTracks()[0];
   if (!track || typeof track.getCapabilities !== "function") return;
@@ -291,6 +301,22 @@ async function tryLockFocus(stream) {
   }
 }
 
+// ============================================
+// 模組 E：上傳 API 通道（先用 mock，之後接後端時只改這個函式內部）
+// ============================================
+function generateSessionId() {
+  return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function uploadPhoto(sessionId, position, sequenceIndex, photoDataUrl) {
+  // 🔧 TODO：串接後端時，把下面這段換成真正的 fetch(...) 上傳邏輯
+  // 呼叫方式（confirmPhoto 裡怎麼呼叫這個函式）不需要改動
+  console.log(
+    `[mock upload] session=${sessionId} position=${position} index=${sequenceIndex} size=${photoDataUrl.length}`
+  );
+  return Promise.resolve({ ok: true, mock: true });
+}
+
 export default function CameraModule() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -300,9 +326,11 @@ export default function CameraModule() {
 
   const orientationOkRef = useRef(true);
   const liveBlurOkRef = useRef(true);
-  const captureStatusRef = useRef(CAPTURE_STATUS.IDLE);
   const positionHintRef = useRef(null);
+  const needsDetectionRef = useRef(true);
   const distanceHintRef = useRef(null);
+  const stageRef = useRef(FLOW_STAGE.SHOOTING);
+  const canAutoCaptureRef = useRef(false);
 
   const lastOrientationCheckRef = useRef(0);
   const consecutiveNormalRef = useRef(0);
@@ -310,29 +338,40 @@ export default function CameraModule() {
   const blurBaselineRef = useRef(null);
   const blurSampleCountRef = useRef(0);
   const detectionsRef = useRef({});
+  const stableSinceRef = useRef(null);
+  const sessionIdRef = useRef(null);
 
   const [status, setStatus] = useState(CAMERA_STATUS.IDLE);
-  const [currentPosition] = useState("front_left");
   const [modelReady, setModelReady] = useState(false);
   const [modelError, setModelError] = useState(false);
   const [detections, setDetections] = useState({});
   const [orientationOk, setOrientationOk] = useState(true);
   const [orientationIssues, setOrientationIssues] = useState({ betaBad: false, gammaBad: false });
 
-  const [captureStatus, setCaptureStatus] = useState(CAPTURE_STATUS.IDLE);
-  const [captureError, setCaptureError] = useState(null);
   const [liveBlurOk, setLiveBlurOk] = useState(true);
   const [positionHint, setPositionHint] = useState(null);
+  const [needsDetection, setNeedsDetection] = useState(true);
   const [distanceHint, setDistanceHint] = useState(null);
+
+  // 模組 E：流程狀態
+  const [stage, setStage] = useState(FLOW_STAGE.SHOOTING);
+  const [positionIndex, setPositionIndex] = useState(0);
+  const [capturedPhotos, setCapturedPhotos] = useState([]); // [{position, dataUrl}]
+  const [previewPhoto, setPreviewPhoto] = useState(null);   // {position, dataUrl}
+  const [lastCaptureSnapshot, setLastCaptureSnapshot] = useState(null); // 拍照當下的框線快照
+  const [retakeReference, setRetakeReference] = useState(null); // 重拍時顯示的參考框
+  const [stableCountdownActive, setStableCountdownActive] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  const currentPosition = POSITION_SEQUENCE[positionIndex];
 
   useEffect(() => {
     detectionsRef.current = detections;
   }, [detections]);
 
-  const updateCaptureStatus = useCallback((newStatus) => {
-    setCaptureStatus(newStatus);
-    captureStatusRef.current = newStatus;
-  }, []);
+  useEffect(() => {
+    stageRef.current = stage;
+  }, [stage]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -372,7 +411,6 @@ export default function CameraModule() {
       }
     }
 
-    // 統一向所有裝置索求極高的理想值，逼出裝置原生最大無裁切畫質，不寫死特定數字
     const constraints = {
       video: {
         facingMode: "environment",
@@ -386,6 +424,9 @@ export default function CameraModule() {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
       await tryLockFocus(stream);
+      if (!sessionIdRef.current) {
+        sessionIdRef.current = generateSessionId();
+      }
       setStatus(CAMERA_STATUS.GRANTED);
     } catch (err) {
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
@@ -397,11 +438,18 @@ export default function CameraModule() {
     }
   }, []);
 
+  // 相機串流附加到 video 元素：stage 切回 SHOOTING 時（例如重拍/下一張/完成後重新檢測）
+  // video 元素會重新掛載，需要重新指定 srcObject
   useEffect(() => {
-    if (status === CAMERA_STATUS.GRANTED && videoRef.current && streamRef.current) {
+    if (
+      status === CAMERA_STATUS.GRANTED &&
+      stage === FLOW_STAGE.SHOOTING &&
+      videoRef.current &&
+      streamRef.current
+    ) {
       videoRef.current.srcObject = streamRef.current;
     }
-  }, [status]);
+  }, [status, stage]);
 
   useEffect(() => {
     return () => stopStream();
@@ -517,17 +565,14 @@ export default function CameraModule() {
   }, [status]);
 
   const runInference = useCallback(() => {
-    // 🔧 拿掉 !liveBlurOkRef.current 條件：模糊時只擋快門，偵測框跟位置/距離提示仍持續運作，
-    // 讓使用者可以在等待畫面變清晰的同時先把位置對好，不會卡住整個對位流程
-    if (
-      !orientationOkRef.current ||
-      captureStatusRef.current !== CAPTURE_STATUS.IDLE
-    ) {
+    if (!orientationOkRef.current || stageRef.current !== FLOW_STAGE.SHOOTING) {
       setDetections({});
       setPositionHint(null);
       positionHintRef.current = null;
       setDistanceHint(null);
       distanceHintRef.current = null;
+      setNeedsDetection(true);
+      needsDetectionRef.current = true;
       return;
     }
 
@@ -626,20 +671,22 @@ export default function CameraModule() {
 
       setDetections(evaluateAlignment(rawResults, currentPosition));
 
-      const { positionHint: posHint, distanceHint: distHint } =
+      const { positionHint: posHint, distanceHint: distHint, incomplete } =
         evaluatePositionAndDistance(rawResults, currentPosition);
       setPositionHint(posHint);
       positionHintRef.current = posHint;
       setDistanceHint(distHint);
       distanceHintRef.current = distHint;
+      setNeedsDetection(incomplete);
+      needsDetectionRef.current = incomplete;
     });
   }, [currentPosition]);
 
   useEffect(() => {
-    if (status !== CAMERA_STATUS.GRANTED || !modelReady) return;
+    if (status !== CAMERA_STATUS.GRANTED || !modelReady || stage !== FLOW_STAGE.SHOOTING) return;
     intervalRef.current = setInterval(runInference, INFERENCE_INTERVAL_MS);
     return () => clearInterval(intervalRef.current);
-  }, [status, modelReady, runInference]);
+  }, [status, modelReady, stage, runInference]);
 
   const savePhotoToDevice = useCallback(async (photoDataUrl) => {
     const fileName = `car_detect_${Date.now()}.jpg`;
@@ -672,19 +719,14 @@ export default function CameraModule() {
     document.body.removeChild(link);
   }, []);
 
-  const takePhoto = useCallback(async () => {
+  // 模組 E：只負責拍照存進暫存，進入預覽畫面，不做任何存檔/上傳動作
+  const takePhoto = useCallback(() => {
+    if (stageRef.current !== FLOW_STAGE.SHOOTING) return;
+
     const video = videoRef.current;
     if (!video || video.readyState < 2) return;
-    if (captureStatusRef.current === CAPTURE_STATUS.CHECKING) return;
-    if (
-      !orientationOkRef.current ||
-      !liveBlurOkRef.current ||
-      positionHintRef.current ||
-      distanceHintRef.current
-    ) return;
-
-    updateCaptureStatus(CAPTURE_STATUS.CHECKING);
-    setCaptureError(null);
+    // 🔧 移除方向鎖/模糊/對齊的條件擋：手動快門測試時，不管條件符不符合都能強制拍照
+    // 自動快門的把關邏輯在 canAutoCaptureRef，不受這裡影響
 
     const rawW = video.videoWidth;
     const rawH = video.videoHeight;
@@ -718,31 +760,130 @@ export default function CameraModule() {
     const outputCanvas = downscaleCanvasIfNeeded(canvas, MAX_OUTPUT_LONG_EDGE);
     const photoDataUrl = outputCanvas.toDataURL("image/jpeg", 0.9);
 
-    try {
-      await savePhotoToDevice(photoDataUrl);
-    } catch (err) {
+    // 快照當下的偵測框與提示文字，供之後選擇「重新拍攝」時顯示參考
+    setLastCaptureSnapshot({
+      detections: detectionsRef.current,
+      hint: positionHintRef.current || distanceHintRef.current,
+    });
+
+    setSaveError(null);
+    setPreviewPhoto({ position: currentPosition, dataUrl: photoDataUrl });
+    setStage(FLOW_STAGE.PREVIEW);
+  }, [currentPosition]);
+
+  // 模組 E：使用者按「確認保留」——這是點擊事件，帶有使用者手勢，
+  // 可以安全呼叫 navigator.share()（自動倒數/背景計時器內絕對不能呼叫這個）
+  const confirmPhoto = useCallback(() => {
+    if (!previewPhoto) return;
+    const photo = previewPhoto;
+    const confirmedIndex = positionIndex;
+
+    setCapturedPhotos((prev) => [...prev, photo]);
+
+    savePhotoToDevice(photo.dataUrl).catch((err) => {
       console.error("儲存照片失敗：", err);
-      setCaptureError("儲存照片失敗，請重新嘗試");
-      updateCaptureStatus(CAPTURE_STATUS.BLOCKED);
+      setSaveError("相簿儲存失敗，請確認裝置分享功能是否正常");
+    });
+
+    // 背景上傳，不阻塞流程（目前是 mock，之後接後端一樣這樣呼叫）
+    uploadPhoto(sessionIdRef.current, photo.position, confirmedIndex, photo.dataUrl).catch((err) => {
+      console.error("上傳失敗（目前為 mock，可忽略）：", err);
+    });
+
+    setRetakeReference(null);
+    setPreviewPhoto(null);
+
+    if (confirmedIndex >= POSITION_SEQUENCE.length - 1) {
+      setStage(FLOW_STAGE.COMPLETE);
+    } else {
+      setPositionIndex(confirmedIndex + 1);
+      setStage(FLOW_STAGE.SHOOTING);
+    }
+  }, [previewPhoto, positionIndex, savePhotoToDevice]);
+
+  // 模組 E：使用者按「重新拍攝」——回到同一個方位，並顯示上次拍攝當下的框線當參考
+  const retakePhoto = useCallback(() => {
+    setRetakeReference(lastCaptureSnapshot);
+    setPreviewPhoto(null);
+    setStage(FLOW_STAGE.SHOOTING);
+  }, [lastCaptureSnapshot]);
+
+  // 模組 E：完成畫面按「重新檢測」——整個流程從頭開始（測試用），相機不需要重新授權
+  const resetFlow = useCallback(() => {
+    sessionIdRef.current = generateSessionId();
+    setPositionIndex(0);
+    setCapturedPhotos([]);
+    setPreviewPhoto(null);
+    setLastCaptureSnapshot(null);
+    setRetakeReference(null);
+    setSaveError(null);
+    stableSinceRef.current = null;
+    setStableCountdownActive(false);
+    setStage(FLOW_STAGE.SHOOTING);
+  }, []);
+
+  // 模組 E：完全回到最初畫面（停止相機串流，需要重新按「開始檢測」授權）
+  const backToStart = useCallback(() => {
+    stopStream();
+    sessionIdRef.current = null;
+    setPositionIndex(0);
+    setCapturedPhotos([]);
+    setPreviewPhoto(null);
+    setLastCaptureSnapshot(null);
+    setRetakeReference(null);
+    setSaveError(null);
+    stableSinceRef.current = null;
+    setStableCountdownActive(false);
+    setStage(FLOW_STAGE.SHOOTING);
+    setStatus(CAMERA_STATUS.IDLE);
+  }, [stopStream]);
+
+  const canAutoCapture =
+    orientationOk &&
+    liveBlurOk &&
+    !needsDetection &&
+    !positionHint &&
+    !distanceHint &&
+    stage === FLOW_STAGE.SHOOTING;
+
+  useEffect(() => {
+    canAutoCaptureRef.current = canAutoCapture;
+  }, [canAutoCapture]);
+
+  // 模組 E：自動快門穩定計時——canCapture 持續為 true 達 CAPTURE_STABLE_DURATION_MS 就自動拍照
+  useEffect(() => {
+    if (status !== CAMERA_STATUS.GRANTED || stage !== FLOW_STAGE.SHOOTING) {
+      stableSinceRef.current = null;
+      setStableCountdownActive(false);
       return;
     }
 
-    updateCaptureStatus(CAPTURE_STATUS.IDLE);
-  }, [savePhotoToDevice, updateCaptureStatus]);
+    const timerId = setInterval(() => {
+      if (!canAutoCaptureRef.current) {
+        stableSinceRef.current = null;
+        setStableCountdownActive(false);
+        return;
+      }
 
-  const dismissCaptureError = useCallback(() => {
-    setCaptureError(null);
-    updateCaptureStatus(CAPTURE_STATUS.IDLE);
-  }, [updateCaptureStatus]);
+      if (stableSinceRef.current === null) {
+        stableSinceRef.current = Date.now();
+      }
+
+      const elapsed = Date.now() - stableSinceRef.current;
+
+      if (elapsed >= CAPTURE_STABLE_DURATION_MS) {
+        stableSinceRef.current = null;
+        setStableCountdownActive(false);
+        takePhoto();
+      } else {
+        setStableCountdownActive(true);
+      }
+    }, 100);
+
+    return () => clearInterval(timerId);
+  }, [status, stage, takePhoto]);
 
   const template = GUIDE_TEMPLATES[currentPosition];
-
-  const canCapture =
-    orientationOk &&
-    liveBlurOk &&
-    !positionHint &&
-    !distanceHint &&
-    captureStatus === CAPTURE_STATUS.IDLE;
 
   return (
     <div style={styles.pageWrapper}>
@@ -775,13 +916,15 @@ export default function CameraModule() {
         </div>
       )}
 
-      {status === CAMERA_STATUS.GRANTED && (
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.SHOOTING && (
         <div style={styles.cameraContainer}>
 
           <div style={styles.viewfinder}>
             <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
 
             {!modelReady && !modelError && <div style={styles.modelStatusBadge}>模型載入中...</div>}
+
+            <div style={styles.positionBadge}>{template?.label}（第 {positionIndex + 1} / {POSITION_SEQUENCE.length} 張）</div>
 
             <svg style={styles.guideOverlay} preserveAspectRatio="none">
               {template && (
@@ -805,6 +948,14 @@ export default function CameraModule() {
                   fill="none" stroke={det.aligned ? "#00ff00" : "#ff9900"} strokeWidth="3"
                 />
               ))}
+              {/* 重新拍攝參考框：灰色虛線，重現上次拍攝當下的偵測位置 */}
+              {retakeReference && Object.entries(retakeReference.detections).map(([key, det]) => (
+                <rect
+                  key={`ref-${key}`} x={`${det.xMinPct}%`} y={`${det.yMinPct}%`}
+                  width={`${det.xMaxPct - det.xMinPct}%`} height={`${det.yMaxPct - det.yMinPct}%`}
+                  fill="none" stroke="#aaaaaa" strokeWidth="2" strokeDasharray="3,3" strokeOpacity="0.7"
+                />
+              ))}
             </svg>
 
             {!orientationOk && (
@@ -814,45 +965,47 @@ export default function CameraModule() {
               </div>
             )}
 
-            {/* 🔧 模糊警告改成跟位置/距離提示同一套小提示條，不再蓋滿整個畫面 */}
             {orientationOk && !liveBlurOk && (
               <div style={styles.hintBanner}>
                 <span>畫面模糊</span>
               </div>
             )}
 
-            {orientationOk && liveBlurOk && distanceHint && (
+            {orientationOk && liveBlurOk && needsDetection && (
+              <div style={styles.hintBanner}>
+                <span>請將車牌與輪胎都置於畫面內</span>
+              </div>
+            )}
+
+            {orientationOk && liveBlurOk && !needsDetection && distanceHint && (
               <div style={styles.hintBanner}>
                 <DirectionArrow direction={distanceHint.arrow} />
                 <span>{distanceHint.text}</span>
               </div>
             )}
 
-            {orientationOk && liveBlurOk && !distanceHint && positionHint && (
+            {orientationOk && liveBlurOk && !needsDetection && !distanceHint && positionHint && (
               <div style={styles.hintBanner}>
                 <DirectionArrow direction={positionHint.arrow} />
                 <span>{positionHint.text}</span>
               </div>
             )}
 
-            {captureStatus === CAPTURE_STATUS.CHECKING && (
-              <div style={styles.checkingOverlay}>
-                <p>儲存中...</p>
+            {orientationOk && liveBlurOk && !needsDetection && !distanceHint && !positionHint && stableCountdownActive && (
+              <div style={styles.hintBanner}>
+                <span>請保持不動</span>
               </div>
             )}
 
-            {captureStatus === CAPTURE_STATUS.BLOCKED && captureError && (
-              <div style={styles.blockedOverlay}>
-                <p style={styles.blockedText}>{captureError}</p>
-                <button style={styles.retryButton} onClick={dismissCaptureError}>重新拍攝</button>
+            {retakeReference && (
+              <div style={styles.retakeReferenceBanner}>
+                <span>灰色虛線框為上次拍攝位置參考</span>
               </div>
             )}
 
-            {canCapture && (
-              <button style={styles.captureButton} onClick={takePhoto}>
-                <div style={styles.captureButtonInner} />
-              </button>
-            )}
+            <button style={styles.captureButton} onClick={takePhoto}>
+              <div style={styles.captureButtonInner} />
+            </button>
           </div>
 
           <div style={styles.debugInfo}>
@@ -864,6 +1017,37 @@ export default function CameraModule() {
             ))}
           </div>
 
+        </div>
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.PREVIEW && previewPhoto && (
+        <div style={styles.previewContainer}>
+          <img src={previewPhoto.dataUrl} alt="拍攝預覽" style={styles.previewImage} />
+          <div style={styles.previewLabel}>{GUIDE_TEMPLATES[previewPhoto.position]?.label}</div>
+          {saveError && <div style={styles.saveErrorText}>{saveError}</div>}
+          <div style={styles.previewButtonRow}>
+            <button style={styles.retakeButton} onClick={retakePhoto}>重新拍攝</button>
+            <button style={styles.confirmButton} onClick={confirmPhoto}>確認保留</button>
+          </div>
+        </div>
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.COMPLETE && (
+        <div style={styles.completeContainer}>
+          <p style={styles.completeTitle}>四個角度拍攝完成</p>
+          {/* 🔧 之後接後端時，這裡改成顯示後端標記車損的分析結果圖，目前先用拍攝原圖代替 */}
+          <div style={styles.thumbnailGrid}>
+            {capturedPhotos.map((p) => (
+              <div key={p.position} style={styles.thumbnailItem}>
+                <img src={p.dataUrl} alt={p.position} style={styles.thumbnailImage} />
+                <span style={styles.thumbnailLabel}>{GUIDE_TEMPLATES[p.position]?.label}</span>
+              </div>
+            ))}
+          </div>
+          <div style={styles.previewButtonRow}>
+            <button style={styles.retakeButton} onClick={backToStart}>回到最開始</button>
+            <button style={styles.retryButton} onClick={resetFlow}>重新檢測</button>
+          </div>
         </div>
       )}
     </div>
@@ -964,6 +1148,20 @@ const styles = {
     fontSize: "12px",
     zIndex: 10,
   },
+  positionBadge: {
+    position: "absolute",
+    top: 8,
+    left: "50%",
+    transform: "translateX(-50%)",
+    backgroundColor: "rgba(0,0,0,0.6)",
+    color: "#fff",
+    padding: "4px 12px",
+    borderRadius: "4px",
+    fontSize: "13px",
+    fontWeight: "bold",
+    zIndex: 10,
+    whiteSpace: "nowrap",
+  },
   orientationWarning: {
     position: "absolute",
     top: 0,
@@ -1001,43 +1199,19 @@ const styles = {
     zIndex: 25,
     pointerEvents: "none",
   },
-  checkingOverlay: {
+  retakeReferenceBanner: {
     position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    height: "100%",
-    backgroundColor: "rgba(0, 0, 0, 0.7)",
-    color: "#fff",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    fontSize: "18px",
-    fontWeight: "bold",
-    zIndex: 50,
-  },
-  blockedOverlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    height: "100%",
-    backgroundColor: "rgba(0, 0, 0, 0.9)",
-    color: "#fff",
-    display: "flex",
-    flexDirection: "column",
-    justifyContent: "center",
-    alignItems: "center",
-    textAlign: "center",
-    padding: "24px",
-    gap: "16px",
-    zIndex: 50,
-  },
-  blockedText: {
-    fontSize: "16px",
-    fontWeight: "bold",
-    color: "#ff9900",
-    maxWidth: "300px",
+    top: 40,
+    left: "50%",
+    transform: "translateX(-50%)",
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+    color: "#aaaaaa",
+    padding: "4px 10px",
+    borderRadius: "12px",
+    fontSize: "12px",
+    whiteSpace: "nowrap",
+    zIndex: 20,
+    pointerEvents: "none",
   },
   debugInfo: {
     position: "absolute",
@@ -1073,5 +1247,97 @@ const styles = {
     height: "54px",
     borderRadius: "50%",
     backgroundColor: "#fff",
+  },
+  previewContainer: {
+    width: "100%",
+    height: "100%",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#000",
+    gap: "16px",
+    padding: "24px",
+  },
+  previewImage: {
+    maxWidth: "100%",
+    maxHeight: "70vh",
+    borderRadius: "8px",
+  },
+  previewLabel: {
+    color: "#fff",
+    fontSize: "16px",
+    fontWeight: "bold",
+  },
+  saveErrorText: {
+    color: "#ff9900",
+    fontSize: "13px",
+    textAlign: "center",
+    maxWidth: "300px",
+  },
+  previewButtonRow: {
+    display: "flex",
+    gap: "16px",
+  },
+  retakeButton: {
+    padding: "14px 28px",
+    fontSize: "16px",
+    borderRadius: "8px",
+    border: "2px solid #fff",
+    backgroundColor: "transparent",
+    color: "#fff",
+    fontWeight: "bold",
+    cursor: "pointer",
+  },
+  confirmButton: {
+    padding: "14px 28px",
+    fontSize: "16px",
+    borderRadius: "8px",
+    border: "none",
+    backgroundColor: "#00ff88",
+    color: "#000",
+    fontWeight: "bold",
+    cursor: "pointer",
+  },
+  completeContainer: {
+    width: "100%",
+    height: "100%",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "flex-start",
+    alignItems: "center",
+    backgroundColor: "#000",
+    gap: "20px",
+    padding: "24px",
+    overflowY: "auto",
+    boxSizing: "border-box",
+  },
+  completeTitle: {
+    color: "#fff",
+    fontSize: "18px",
+    fontWeight: "bold",
+  },
+  thumbnailGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: "12px",
+    width: "100%",
+    maxWidth: "280px",
+  },
+  thumbnailItem: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "4px",
+  },
+  thumbnailImage: {
+    width: "100%",
+    borderRadius: "6px",
+    aspectRatio: "9 / 16",
+    objectFit: "cover",
+  },
+  thumbnailLabel: {
+    color: "#ccc",
+    fontSize: "13px",
   },
 };
