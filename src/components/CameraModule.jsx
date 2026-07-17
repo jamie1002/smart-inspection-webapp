@@ -16,17 +16,15 @@ const AREA_TOLERANCE_RATIO = 0.1;
 // 車牌字元辨識模型設定
 // ============================================
 const CHAR_MODEL_URL = `${import.meta.env.BASE_URL}model_char/model.json`;
-// class 順序務必跟 Colab 印出的 data.yaml 完全一致，已排除 I、O、4
 const CHAR_CLASS_NAMES = [
   "0", "1", "2", "3", "5", "6", "7", "8", "9",
   "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L",
   "M", "N", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
 ];
 const CHAR_CONFIDENCE_THRESHOLD = 0.6;
-// ⚠️ 未經實測的猜測起始值：字元框重疊超過此比例視為同一個字元，太容易漏字就調大，太容易重複就調小
 const CHAR_NMS_IOU_THRESHOLD = 0.3;
-const CHAR_CROP_PADDING_PERCENT = 20;
-const CHAR_INPUT_SIZE = 640; // 對應 Roboflow「Fit (black edges) in 640x640」的訓練前處理
+const CHAR_CROP_PADDING_PERCENT = 10;
+const CHAR_INPUT_SIZE = 640;
 
 // 方向鎖相關設定
 const GAMMA_THRESHOLD = 25;
@@ -35,48 +33,40 @@ const BETA_MAX = 95;
 const ORIENTATION_THROTTLE_MS = 150;
 const ORIENTATION_STABLE_SAMPLES = 1;
 
-// 模組 D：畫質檢驗相關設定（漸進式基準 EMA，避免單一雜訊尖峰讓基準暴衝）
+// 模組 D：畫質檢驗相關設定
 const LIVE_BLUR_CHECK_INTERVAL_MS = 200;
 const LIVE_BLUR_SAMPLE_WIDTH = 160;
 const LIVE_BLUR_STABLE_SAMPLES = 2;
 const BLUR_BASELINE_MIN_SAMPLES = 4;
-// ⚠️ 未經實測的猜測起始值，若還是太容易判定模糊，先調小 BLUR_RELATIVE_RATIO，再調小這個
 const BLUR_BASELINE_EMA_ALPHA = 0.15;
-// ⚠️ 未經實測的猜測起始值：分數低於基準值的這個比例就判定模糊，太容易模糊就調小
 const BLUR_RELATIVE_RATIO = 0.5;
 
 // 模組 C：位置/距離提示相關設定
-// ⚠️ 方向對應關係尚未實機驗證，若提示方向相反，只需要把下面數值從 1 改成 -1
-const HORIZONTAL_HINT_SIGN = 1;
+const HORIZONTAL_HINT_SIGN = -1;
 const VERTICAL_HINT_SIGN = 1;
 
 // 存檔輸出設定
-const MAX_OUTPUT_LONG_EDGE = 1920; // 只在超過此上限時等比例縮小，不放大
+const MAX_OUTPUT_LONG_EDGE = 1920;
 
-// 🔧 模型輸入與拍照存檔共用的裁切比例（= APP 顯示畫面的比例）
 const DISPLAY_CROP_RATIO = 9 / 16;
 
 // ============================================
 // 模組 E：自動快門與流程控制設定
 // ============================================
-// 🔧 可自行修改測試：五個對齊條件都通過後，要「連續穩定」多久才自動觸發快門
 const CAPTURE_STABLE_DURATION_MS = 1000;
-
-// 🔧 模擬等待後端 AI 辨識車損的時間，之後接後端時改成實際等待 API 回應，這個常數可移除
 const ANALYZING_DURATION_MS = 2000;
 
-// 拍攝順序：左前 → 左後 → 右後 → 右前
 const POSITION_SEQUENCE = ["front_left", "left_rear", "right_rear", "right_front"];
 
 const FLOW_STAGE = {
-  SHOOTING: "shooting",             // 取景/等待對齊/自動快門
-  PREVIEW: "preview",               // 剛拍完，等使用者確認保留或重拍
-  ANALYZING: "analyzing",           // 模擬等待後端 AI 辨識車況
-  REVIEW_INTRO: "review_intro",     // 提示使用者即將比對車損標記
-  REVIEWING: "reviewing",           // 逐張比對確認車損標記
-  DOWNLOAD_PROMPT: "download_prompt", // 詢問是否下載照片到相簿
-  MANUAL_SAVE: "manual_save",       // 裝置不支援分享 API 時，引導使用者長按儲存
-  COMPLETE: "complete",             // 全部完成
+  SHOOTING: "shooting",
+  PREVIEW: "preview",
+  ANALYZING: "analyzing",
+  REVIEW_INTRO: "review_intro",
+  REVIEWING: "reviewing",
+  DOWNLOAD_PROMPT: "download_prompt",
+  MANUAL_SAVE: "manual_save",
+  COMPLETE: "complete",
 };
 
 const GUIDE_TEMPLATES = {
@@ -149,10 +139,12 @@ function evaluateAlignment(rawResults, position) {
   return evaluated;
 }
 
-// 計算位置與距離提示（優先權：距離 > 位置）
+// 優先權：方位反轉 > 距離（前後）+ 左右（中心點優先，其次寬度） > 上下置中
 function evaluatePositionAndDistance(rawResults, position) {
   const template = GUIDE_TEMPLATES[position];
-  if (!template) return { positionHint: null, distanceHint: null };
+  if (!template) {
+    return { distanceHint: null, horizontalHint: null, verticalHint: null, isFlipped: false, incomplete: false };
+  }
 
   const candidates = [];
 
@@ -168,9 +160,10 @@ function evaluatePositionAndDistance(rawResults, position) {
 
     const dx = detCenterX - targetCenterX;
     const dy = detCenterY - targetCenterY;
-    const positionError = Math.sqrt(dx * dx + dy * dy);
-    const positionOk =
-      Math.abs(dx) <= POSITION_TOLERANCE_PERCENT && Math.abs(dy) <= POSITION_TOLERANCE_PERCENT;
+
+    const detWidthPct = det.xMaxPct - det.xMinPct;
+    const targetWidthPct = target.xMax - target.xMin;
+    const widthRatio = targetWidthPct > 0 ? detWidthPct / targetWidthPct : 0;
 
     const detArea = (det.xMaxPct - det.xMinPct) * (det.yMaxPct - det.yMinPct);
     const targetArea = (target.xMax - target.xMin) * (target.yMax - target.yMin);
@@ -179,14 +172,27 @@ function evaluatePositionAndDistance(rawResults, position) {
     const areaOk =
       areaRatio >= 1 - AREA_TOLERANCE_RATIO && areaRatio <= 1 + AREA_TOLERANCE_RATIO;
 
-    candidates.push({ key, dx, dy, positionError, positionOk, areaRatio, areaError, areaOk });
+    candidates.push({ key, dx, dy, centerX: detCenterX, widthRatio, areaRatio, areaError, areaOk });
   }
 
-  // 未同時偵測到車牌與輪胎時，視為「尚未偵測到完整物件」，不計算位置/距離提示
   if (candidates.length < CLASS_NAMES.length) {
-    return { positionHint: null, distanceHint: null, incomplete: true };
+    return { distanceHint: null, horizontalHint: null, verticalHint: null, isFlipped: false, incomplete: true };
   }
 
+  // 方位反轉判斷（最高優先權）：比對「模板定義的左右順序」與「實際偵測到的左右順序」
+  const plateCandidate = candidates.find((c) => c.key === "license_plate");
+  const wheelCandidate = candidates.find((c) => c.key === "wheel");
+  const plateTargetCenterX = (template.licensePlate.xMin + template.licensePlate.xMax) / 2;
+  const wheelTargetCenterX = (template.wheel.xMin + template.wheel.xMax) / 2;
+  const expectedPlateLeftOfWheel = plateTargetCenterX < wheelTargetCenterX;
+  const actualPlateLeftOfWheel = plateCandidate.centerX < wheelCandidate.centerX;
+  const isFlipped = expectedPlateLeftOfWheel !== actualPlateLeftOfWheel;
+
+  if (isFlipped) {
+    return { distanceHint: null, horizontalHint: null, verticalHint: null, isFlipped: true, incomplete: false };
+  }
+
+  // 距離提示（前後，面積比例）——獨立判斷，可與左右提示同時出現
   let distanceHint = null;
   const misalignedByArea = candidates.filter((c) => !c.areaOk);
   if (misalignedByArea.length > 0) {
@@ -199,31 +205,53 @@ function evaluatePositionAndDistance(rawResults, position) {
     };
   }
 
-  let positionHint = null;
-  if (!distanceHint) {
-    const misalignedByPosition = candidates.filter((c) => !c.positionOk);
-    if (misalignedByPosition.length > 0) {
-      const worst = misalignedByPosition.reduce((a, b) => (b.positionError > a.positionError ? b : a));
-      const dxAdj = worst.dx * HORIZONTAL_HINT_SIGN;
-      const dyAdj = worst.dy * VERTICAL_HINT_SIGN;
+  // 左右提示：第一層先看中心點置中，中心點OK後才看第二層寬度
+  let horizontalHint = null;
+  const misalignedByCenterX = candidates.filter((c) => Math.abs(c.dx) > POSITION_TOLERANCE_PERCENT);
 
-      if (Math.abs(dxAdj) >= Math.abs(dyAdj)) {
-        positionHint = {
-          text: dxAdj > 0 ? "請往左移動" : "請往右移動",
-          arrow: dxAdj > 0 ? "left" : "right",
-          key: worst.key,
-        };
-      } else {
-        positionHint = {
-          text: dyAdj > 0 ? "請往上移動" : "請往下移動",
-          arrow: dyAdj > 0 ? "up" : "down",
-          key: worst.key,
-        };
-      }
+  if (misalignedByCenterX.length > 0) {
+    const worst = misalignedByCenterX.reduce((a, b) =>
+      Math.abs(b.dx) > Math.abs(a.dx) ? b : a
+    );
+    const dxAdj = worst.dx * HORIZONTAL_HINT_SIGN;
+    horizontalHint = {
+      text: dxAdj > 0 ? "請往左移動" : "請往右移動",
+      arrow: dxAdj > 0 ? "left" : "right",
+      key: worst.key,
+    };
+  } else {
+    // 中心點已置中，才檢查寬度
+    const leftCandidate = expectedPlateLeftOfWheel ? plateCandidate : wheelCandidate;
+    const rightCandidate = expectedPlateLeftOfWheel ? wheelCandidate : plateCandidate;
+    const leftOverWidth = leftCandidate.widthRatio - (1 + AREA_TOLERANCE_RATIO);
+    const rightOverWidth = rightCandidate.widthRatio - (1 + AREA_TOLERANCE_RATIO);
+
+    if (leftOverWidth > 0 || rightOverWidth > 0) {
+      horizontalHint =
+        leftOverWidth >= rightOverWidth
+          ? { text: "請往右移動", arrow: "right", key: leftCandidate.key }
+          : { text: "請往左移動", arrow: "left", key: rightCandidate.key };
     }
   }
 
-  return { positionHint, distanceHint, incomplete: false };
+  // 上下置中：最低優先權，只有左右完全通過（中心點+寬度都OK）才計算
+  let verticalHint = null;
+  if (!horizontalHint) {
+    const misalignedByCenterY = candidates.filter((c) => Math.abs(c.dy) > POSITION_TOLERANCE_PERCENT);
+    if (misalignedByCenterY.length > 0) {
+      const worst = misalignedByCenterY.reduce((a, b) =>
+        Math.abs(b.dy) > Math.abs(a.dy) ? b : a
+      );
+      const dyAdj = worst.dy * VERTICAL_HINT_SIGN;
+      verticalHint = {
+        text: dyAdj > 0 ? "請往上移動" : "請往下移動",
+        arrow: dyAdj > 0 ? "up" : "down",
+        key: worst.key,
+      };
+    }
+  }
+
+  return { distanceHint, horizontalHint, verticalHint, isFlipped: false, incomplete: false };
 }
 
 // 手刻輕量版 Laplacian 模糊分數計算
@@ -261,7 +289,6 @@ function calculateBlurScore(sourceCanvas) {
   return variance;
 }
 
-// 只在超過上限時等比例縮小，避免放大造成反效果模糊
 function downscaleCanvasIfNeeded(sourceCanvas, maxLongEdge) {
   const { width, height } = sourceCanvas;
   const longEdge = Math.max(width, height);
@@ -276,8 +303,6 @@ function downscaleCanvasIfNeeded(sourceCanvas, maxLongEdge) {
   return outCanvas;
 }
 
-// 🔧 模組 E 簡化：計算「APP 顯示畫面」(9:16 裁切) 的裁切尺寸與是否為橫向 feed
-// takePhoto() 跟 runInference() 都呼叫這支，確保拍照存檔跟模型輸入用同一套裁切邏輯
 function computeDisplayCropGeometry(rawW, rawH) {
   const isLandscapeFeed = rawW > rawH;
   const logicalW = isLandscapeFeed ? rawH : rawW;
@@ -296,9 +321,6 @@ function computeDisplayCropGeometry(rawW, rawH) {
   return { isLandscapeFeed, cropW, cropH };
 }
 
-// ============================================
-// 車牌字元辨識用的裁切/前處理輔助函式
-// ============================================
 function expandBoxByPercent(xMin, xMax, yMin, yMax, paddingPercent) {
   const w = xMax - xMin;
   const h = yMax - yMin;
@@ -328,7 +350,6 @@ function cropRegionByPercent(sourceCanvas, xMinPct, xMaxPct, yMinPct, yMaxPct) {
   return cropCanvas;
 }
 
-// 把來源畫布「Fit」進正方形畫布（等比縮放+置中補黑邊），對應訓練時的前處理方式
 function letterboxToSquare(sourceCanvas, size) {
   const { width, height } = sourceCanvas;
   const scale = size / Math.max(width, height);
@@ -348,7 +369,6 @@ function letterboxToSquare(sourceCanvas, size) {
   return { canvas: outCanvas, scale, padLeft, padTop };
 }
 
-// 方向箭頭元件
 function DirectionArrow({ direction }) {
   if (direction === "near" || direction === "far") {
     const rotation = direction === "near" ? 0 : 180;
@@ -368,9 +388,6 @@ function DirectionArrow({ direction }) {
   );
 }
 
-// 設定相機鏡頭：明確鎖定 1x 主鏡頭（避免部分 Android 裝置變焦到極端值時切換到超廣角/微距鏡頭），
-// 對焦改用連續自動對焦（不再鎖定對焦距離）。
-// 注意：getCapabilities() 在 iOS Safari 上不存在，這整段對 iOS 完全不生效（安全，因為 iOS 本來就預設主鏡頭）
 async function tryConfigureCamera(stream) {
   const track = stream.getVideoTracks()[0];
   if (!track || typeof track.getCapabilities !== "function") return;
@@ -385,7 +402,6 @@ async function tryConfigureCamera(stream) {
 
   const advanced = [];
 
-  // 明確鎖定變焦在 1x（不是 zoom.min，避免部分機型的 min 值對應到超廣角鏡頭）
   if (
     capabilities.zoom &&
     typeof capabilities.zoom.min === "number" &&
@@ -396,7 +412,6 @@ async function tryConfigureCamera(stream) {
     advanced.push({ zoom: 1 });
   }
 
-  // 明確指定連續自動對焦（多數裝置預設本來就是這個，這裡明確指定較保險）
   if (capabilities.focusMode && capabilities.focusMode.includes("continuous")) {
     advanced.push({ focusMode: "continuous" });
   }
@@ -410,27 +425,17 @@ async function tryConfigureCamera(stream) {
   }
 }
 
-// ============================================
-// 模組 E：上傳 API 通道（先用 mock，之後接後端時只改這個函式內部）
-// ============================================
 function generateSessionId() {
   return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 async function uploadPhoto(sessionId, position, sequenceIndex, photoDataUrl) {
-  // 🔧 TODO：串接後端時，把下面這段換成真正的 fetch(...) 上傳邏輯
-  // 呼叫方式（confirmPhoto 裡怎麼呼叫這個函式）不需要改動
   console.log(
     `[mock upload] session=${sessionId} position=${position} index=${sequenceIndex} size=${photoDataUrl.length}`
   );
   return Promise.resolve({ ok: true, mock: true });
 }
 
-// 🔧 唯一能保證存進系統相簿的方式：navigator.share() 讓使用者在系統面板點「儲存到照片」。
-// 回傳三種結果：
-//   "shared"      分享成功（使用者已選擇儲存或其他分享目標）
-//   "cancelled"   使用者主動取消分享面板，不當作錯誤，停留原畫面即可
-//   "unsupported" 裝置不支援 / 呼叫失敗，需要改用「引導長按儲存」畫面
 async function trySharePhotos(photos) {
   if (!navigator.share) return "unsupported";
 
@@ -465,7 +470,7 @@ export default function CameraModule() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const modelRef = useRef(null);
-  const charModelRef = useRef(null); // 🔧 新增：車牌字元辨識模型
+  const charModelRef = useRef(null);
   const inputCanvasRef = useRef(null);
   const intervalRef = useRef(null);
 
@@ -486,26 +491,27 @@ export default function CameraModule() {
   const [status, setStatus] = useState(CAMERA_STATUS.IDLE);
   const [modelReady, setModelReady] = useState(false);
   const [modelError, setModelError] = useState(false);
-  const [charModelReady, setCharModelReady] = useState(false); // 🔧 新增
-  const [charModelError, setCharModelError] = useState(false); // 🔧 新增
+  const [charModelReady, setCharModelReady] = useState(false);
+  const [charModelError, setCharModelError] = useState(false);
   const [detections, setDetections] = useState({});
   const [orientationOk, setOrientationOk] = useState(true);
   const [orientationIssues, setOrientationIssues] = useState({ betaBad: false, gammaBad: false });
 
   const [liveBlurOk, setLiveBlurOk] = useState(true);
-  const [positionHint, setPositionHint] = useState(null);
   const [needsDetection, setNeedsDetection] = useState(true);
   const [distanceHint, setDistanceHint] = useState(null);
+  const [horizontalHint, setHorizontalHint] = useState(null);
+  const [verticalHint, setVerticalHint] = useState(null);
+  const [isFlipped, setIsFlipped] = useState(false);
 
-  // 模組 E：流程狀態
   const [stage, setStage] = useState(FLOW_STAGE.SHOOTING);
   const [positionIndex, setPositionIndex] = useState(0);
-  const [capturedPhotos, setCapturedPhotos] = useState([]); // [{position, dataUrl}]
-  const [previewPhoto, setPreviewPhoto] = useState(null);   // {position, dataUrl}
+  const [capturedPhotos, setCapturedPhotos] = useState([]);
+  const [previewPhoto, setPreviewPhoto] = useState(null);
   const [stableCountdownActive, setStableCountdownActive] = useState(false);
-  const [reviewIndex, setReviewIndex] = useState(0); // 逐張比對車損標記時，目前顯示第幾張
-  const [isSharing, setIsSharing] = useState(false); // 分享處理中，避免重複點擊
-  const [ocrResult, setOcrResult] = useState(null); // 🔧 新增：{ text, confidence }
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [isSharing, setIsSharing] = useState(false);
+  const [ocrResult, setOcrResult] = useState(null);
 
   const currentPosition = POSITION_SEQUENCE[positionIndex];
 
@@ -582,8 +588,6 @@ export default function CameraModule() {
     }
   }, []);
 
-  // 相機串流附加到 video 元素：stage 切回 SHOOTING 時（例如重拍/下一張/重新檢測）
-  // video 元素會重新掛載，需要重新指定 srcObject
   useEffect(() => {
     if (
       status === CAMERA_STATUS.GRANTED &&
@@ -616,7 +620,6 @@ export default function CameraModule() {
     return () => { cancelled = true; };
   }, []);
 
-  // 🔧 新增：載入車牌字元辨識模型
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -670,7 +673,7 @@ export default function CameraModule() {
 
   useEffect(() => {
     if (status !== CAMERA_STATUS.GRANTED) return;
-    blurBaselineRef.current = null; // 每次重新開啟相機時重置基準
+    blurBaselineRef.current = null;
     blurSampleCountRef.current = 0;
 
     const checkLiveBlur = () => {
@@ -729,8 +732,10 @@ export default function CameraModule() {
   const runInference = useCallback(() => {
     if (!orientationOkRef.current || stageRef.current !== FLOW_STAGE.SHOOTING) {
       setDetections({});
-      setPositionHint(null);
       setDistanceHint(null);
+      setHorizontalHint(null);
+      setVerticalHint(null);
+      setIsFlipped(false);
       setNeedsDetection(true);
       return;
     }
@@ -745,7 +750,6 @@ export default function CameraModule() {
     const rawH = video.videoHeight;
     if (!rawW || !rawH) return;
 
-    // 模型輸入畫面採用「APP 顯示畫面」(9:16 裁切)，跟 takePhoto() 用同一套裁切幾何
     const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
     const scale = 640 / Math.max(cropW, cropH);
@@ -817,10 +821,17 @@ export default function CameraModule() {
 
       setDetections(evaluateAlignment(rawResults, currentPosition));
 
-      const { positionHint: posHint, distanceHint: distHint, incomplete } =
-        evaluatePositionAndDistance(rawResults, currentPosition);
-      setPositionHint(posHint);
+      const {
+        distanceHint: distHint,
+        horizontalHint: hHint,
+        verticalHint: vHint,
+        isFlipped: flipped,
+        incomplete,
+      } = evaluatePositionAndDistance(rawResults, currentPosition);
       setDistanceHint(distHint);
+      setHorizontalHint(hHint);
+      setVerticalHint(vHint);
+      setIsFlipped(flipped);
       setNeedsDetection(incomplete);
     });
   }, [currentPosition]);
@@ -831,7 +842,6 @@ export default function CameraModule() {
     return () => clearInterval(intervalRef.current);
   }, [status, modelReady, stage, runInference]);
 
-  // 🔧 新增：車牌字元辨識核心邏輯（含多實例解析 + NMS，車牌字元可重複出現，不能用單類別找最高分的寫法）
   const recognizePlateCharacters = useCallback(async (sourceCanvas, plateDetection) => {
     const charModel = charModelRef.current;
     if (!charModel || !plateDetection) return null;
@@ -856,11 +866,10 @@ export default function CameraModule() {
     const rawBoxesData = tf.tidy(() => {
       const inputTensor = tf.browser.fromPixels(inputCanvas).toFloat().div(255.0).expandDims(0);
       const output = charModel.execute(inputTensor);
-      const parsed = output.squeeze([0]).transpose([1, 0]); // [8400, 4+33]
+      const parsed = output.squeeze([0]).transpose([1, 0]);
       return parsed.arraySync();
     });
 
-    // 逐列取「該框信心最高的 class」，不是逐 class 找最高分（同一字元會在車牌上重複出現）
     const candidates = [];
     for (let i = 0; i < rawBoxesData.length; i++) {
       const row = rawBoxesData[i];
@@ -885,7 +894,6 @@ export default function CameraModule() {
 
     if (candidates.length === 0) return null;
 
-    // NMS 去除重疊框（tf.image.nonMaxSuppressionAsync 要求 [y1, x1, y2, x2] 順序）
     const boxesTensor = tf.tensor2d(candidates.map((c) => [c.y1, c.x1, c.y2, c.x2]));
     const scoresTensor = tf.tensor1d(candidates.map((c) => c.conf));
 
@@ -901,7 +909,6 @@ export default function CameraModule() {
     scoresTensor.dispose();
     nmsIndices.dispose();
 
-    // 依 x 座標（還原回裁切後座標系）排序，重建車牌字串
     const kept = keepIndices.map((idx) => {
       const c = candidates[idx];
       const realX1 = (c.x1 - padLeft) / scale;
@@ -921,14 +928,11 @@ export default function CameraModule() {
     return { text, confidence: avgConf };
   }, []);
 
-  // 模組 E：只負責拍照存進暫存，進入預覽畫面，不做任何存檔/上傳動作
   const takePhoto = useCallback(() => {
     if (stageRef.current !== FLOW_STAGE.SHOOTING) return;
 
     const video = videoRef.current;
     if (!video || video.readyState < 2) return;
-    // 🔧 移除方向鎖/模糊/對齊的條件擋：手動快門測試時，不管條件符不符合都能強制拍照
-    // 自動快門的把關邏輯在 canAutoCaptureRef，不受這裡影響
 
     const rawW = video.videoWidth;
     const rawH = video.videoHeight;
@@ -951,7 +955,6 @@ export default function CameraModule() {
     setPreviewPhoto({ position: currentPosition, dataUrl: photoDataUrl });
     setStage(FLOW_STAGE.PREVIEW);
 
-    // 🔧 新增：非同步跑字元辨識，不阻擋預覽畫面顯示
     setOcrResult(null);
     if (charModelReady && detectionsRef.current["license_plate"]) {
       recognizePlateCharacters(outputCanvas, detectionsRef.current["license_plate"])
@@ -962,8 +965,6 @@ export default function CameraModule() {
     }
   }, [currentPosition, charModelReady, recognizePlateCharacters]);
 
-  // 模組 E：使用者按「確認保留」——只把照片存進暫存陣列並前進，
-  // 不在這裡存相簿（相簿存檔集中在四張都比對完之後，DOWNLOAD_PROMPT 那一步）
   const confirmPhoto = useCallback(() => {
     if (!previewPhoto) return;
     const photo = previewPhoto;
@@ -971,7 +972,6 @@ export default function CameraModule() {
 
     setCapturedPhotos((prev) => [...prev, photo]);
 
-    // 背景上傳，不阻塞流程（目前是 mock，之後接後端一樣這樣呼叫）
     uploadPhoto(sessionIdRef.current, photo.position, confirmedIndex, photo.dataUrl).catch((err) => {
       console.error("上傳失敗（目前為 mock，可忽略）：", err);
     });
@@ -986,13 +986,11 @@ export default function CameraModule() {
     }
   }, [previewPhoto, positionIndex]);
 
-  // 模組 E：使用者按「重新拍攝」——回到同一個方位重新取景
   const retakePhoto = useCallback(() => {
     setPreviewPhoto(null);
     setStage(FLOW_STAGE.SHOOTING);
   }, []);
 
-  // 模組 E：模擬等待後端 AI 辨識，時間到自動進入「請比對車損標記」畫面
   useEffect(() => {
     if (stage !== FLOW_STAGE.ANALYZING) return;
     const timerId = setTimeout(() => {
@@ -1001,13 +999,11 @@ export default function CameraModule() {
     return () => clearTimeout(timerId);
   }, [stage]);
 
-  // 使用者按「開始確認」，從第一張開始逐張比對
   const startReview = useCallback(() => {
     setReviewIndex(0);
     setStage(FLOW_STAGE.REVIEWING);
   }, []);
 
-  // 使用者對目前這張按「確認無誤」，前進下一張，最後一張確認完進入下載詢問
   const confirmReviewPhoto = useCallback(() => {
     if (reviewIndex >= capturedPhotos.length - 1) {
       setStage(FLOW_STAGE.DOWNLOAD_PROMPT);
@@ -1016,7 +1012,6 @@ export default function CameraModule() {
     }
   }, [reviewIndex, capturedPhotos.length]);
 
-  // 使用者選擇「是」要下載照片：這是點擊事件，帶有使用者手勢，可以安全呼叫 navigator.share()
   const handleDownloadConfirm = useCallback(async () => {
     if (isSharing) return;
     setIsSharing(true);
@@ -1032,17 +1027,14 @@ export default function CameraModule() {
     }
   }, [capturedPhotos, isSharing]);
 
-  // 使用者選擇「否」，跳過儲存直接完成
   const handleDownloadSkip = useCallback(() => {
     setStage(FLOW_STAGE.COMPLETE);
   }, []);
 
-  // 手動儲存引導畫面按「完成」，代表使用者已自行長按儲存
   const finishManualSave = useCallback(() => {
     setStage(FLOW_STAGE.COMPLETE);
   }, []);
 
-  // 模組 E：完成畫面按「重新檢測」——整個流程從頭開始（測試用），相機不需要重新授權
   const resetFlow = useCallback(() => {
     sessionIdRef.current = generateSessionId();
     setPositionIndex(0);
@@ -1056,7 +1048,6 @@ export default function CameraModule() {
     setStage(FLOW_STAGE.SHOOTING);
   }, []);
 
-  // 模組 E：完全回到最初畫面（停止相機串流，需要重新按「開始檢測」授權）
   const backToStart = useCallback(() => {
     stopStream();
     sessionIdRef.current = null;
@@ -1076,15 +1067,16 @@ export default function CameraModule() {
     orientationOk &&
     liveBlurOk &&
     !needsDetection &&
-    !positionHint &&
+    !isFlipped &&
     !distanceHint &&
+    !horizontalHint &&
+    !verticalHint &&
     stage === FLOW_STAGE.SHOOTING;
 
   useEffect(() => {
     canAutoCaptureRef.current = canAutoCapture;
   }, [canAutoCapture]);
 
-  // 模組 E：自動快門穩定計時——canAutoCapture 持續為 true 達 CAPTURE_STABLE_DURATION_MS 就自動拍照
   useEffect(() => {
     if (status !== CAMERA_STATUS.GRANTED || stage !== FLOW_STAGE.SHOOTING) {
       stableSinceRef.current = null;
@@ -1185,40 +1177,56 @@ export default function CameraModule() {
               ))}
             </svg>
 
-            {!orientationOk && (
+            {isFlipped && (
+              <div style={styles.orientationWarning}>
+                <p>請重新確認方位</p>
+              </div>
+            )}
+
+            {!isFlipped && !orientationOk && (
               <div style={styles.orientationWarning}>
                 {orientationIssues.betaBad && <p>請直立鏡頭</p>}
                 {orientationIssues.gammaBad && <p>請保持畫面水平</p>}
               </div>
             )}
 
-            {orientationOk && !liveBlurOk && (
+            {!isFlipped && orientationOk && !liveBlurOk && (
               <div style={styles.hintBanner}>
                 <span>畫面模糊</span>
               </div>
             )}
 
-            {orientationOk && liveBlurOk && needsDetection && (
+            {!isFlipped && orientationOk && liveBlurOk && needsDetection && (
               <div style={styles.hintBanner}>
                 <span>請將車牌與輪胎都置於畫面內</span>
               </div>
             )}
 
-            {orientationOk && liveBlurOk && !needsDetection && distanceHint && (
-              <div style={styles.hintBanner}>
-                <DirectionArrow direction={distanceHint.arrow} />
-                <span>{distanceHint.text}</span>
+            {!isFlipped && orientationOk && liveBlurOk && !needsDetection && (distanceHint || horizontalHint) && (
+              <div style={styles.hintBannerStack}>
+                {distanceHint && (
+                  <div style={styles.hintPill}>
+                    <DirectionArrow direction={distanceHint.arrow} />
+                    <span>{distanceHint.text}</span>
+                  </div>
+                )}
+                {horizontalHint && (
+                  <div style={styles.hintPill}>
+                    <DirectionArrow direction={horizontalHint.arrow} />
+                    <span>{horizontalHint.text}</span>
+                  </div>
+                )}
               </div>
             )}
 
-            {orientationOk && liveBlurOk && !needsDetection && !distanceHint && positionHint && (
+            {!isFlipped && orientationOk && liveBlurOk && !needsDetection && !distanceHint && !horizontalHint && verticalHint && (
               <div style={styles.hintBanner}>
-                <DirectionArrow direction={positionHint.arrow} />
-                <span>{positionHint.text}</span>
+                <DirectionArrow direction={verticalHint.arrow} />
+                <span>{verticalHint.text}</span>
               </div>
             )}
 
-            {orientationOk && liveBlurOk && !needsDetection && !distanceHint && !positionHint && stableCountdownActive && (
+            {!isFlipped && orientationOk && liveBlurOk && !needsDetection && !distanceHint && !horizontalHint && !verticalHint && stableCountdownActive && (
               <div style={styles.hintBanner}>
                 <span>請保持不動</span>
               </div>
@@ -1245,7 +1253,6 @@ export default function CameraModule() {
         <div style={styles.previewContainer}>
           <img src={previewPhoto.dataUrl} alt="拍攝預覽" style={styles.previewImage} />
           <div style={styles.previewLabel}>{GUIDE_TEMPLATES[previewPhoto.position]?.label}</div>
-          {/* 🔧 新增：車牌字元辨識結果顯示 */}
           {ocrResult && (
             <div style={styles.previewLabel}>
               車牌辨識：{ocrResult.text}（信心 {ocrResult.confidence.toFixed(2)}）
@@ -1273,7 +1280,6 @@ export default function CameraModule() {
 
       {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.REVIEWING && reviewPhoto && (
         <div style={styles.reviewPhotoContainer}>
-          {/* 🔧 之後接後端時，這裡的 dataUrl 改成後端回傳的「車損標記後」照片，目前先用拍攝原圖代替 */}
           <img src={reviewPhoto.dataUrl} alt="車損標記比對" style={styles.reviewPhotoImage} />
           <div style={styles.reviewProgressBadge}>
             {GUIDE_TEMPLATES[reviewPhoto.position]?.label}（第 {reviewIndex + 1} / {capturedPhotos.length} 張）
@@ -1493,6 +1499,30 @@ const styles = {
     whiteSpace: "nowrap",
     zIndex: 25,
     pointerEvents: "none",
+  },
+  hintBannerStack: {
+    position: "absolute",
+    bottom: "120px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "8px",
+    zIndex: 25,
+    pointerEvents: "none",
+  },
+  hintPill: {
+    backgroundColor: "rgba(0, 0, 0, 0.75)",
+    color: "#fff",
+    padding: "8px 16px",
+    borderRadius: "24px",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    fontSize: "15px",
+    fontWeight: "bold",
+    whiteSpace: "nowrap",
   },
   debugInfo: {
     position: "absolute",
