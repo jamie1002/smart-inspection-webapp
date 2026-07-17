@@ -12,6 +12,22 @@ const INFERENCE_INTERVAL_MS = 150;
 const POSITION_TOLERANCE_PERCENT = 5;
 const AREA_TOLERANCE_RATIO = 0.1;
 
+// ============================================
+// 車牌字元辨識模型設定
+// ============================================
+const CHAR_MODEL_URL = `${import.meta.env.BASE_URL}model_char/model.json`;
+// class 順序務必跟 Colab 印出的 data.yaml 完全一致，已排除 I、O、4
+const CHAR_CLASS_NAMES = [
+  "0", "1", "2", "3", "5", "6", "7", "8", "9",
+  "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L",
+  "M", "N", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+];
+const CHAR_CONFIDENCE_THRESHOLD = 0.6;
+// ⚠️ 未經實測的猜測起始值：字元框重疊超過此比例視為同一個字元，太容易漏字就調大，太容易重複就調小
+const CHAR_NMS_IOU_THRESHOLD = 0.3;
+const CHAR_CROP_PADDING_PERCENT = 20;
+const CHAR_INPUT_SIZE = 640; // 對應 Roboflow「Fit (black edges) in 640x640」的訓練前處理
+
 // 方向鎖相關設定
 const GAMMA_THRESHOLD = 25;
 const BETA_MIN = 60;
@@ -280,6 +296,58 @@ function computeDisplayCropGeometry(rawW, rawH) {
   return { isLandscapeFeed, cropW, cropH };
 }
 
+// ============================================
+// 車牌字元辨識用的裁切/前處理輔助函式
+// ============================================
+function expandBoxByPercent(xMin, xMax, yMin, yMax, paddingPercent) {
+  const w = xMax - xMin;
+  const h = yMax - yMin;
+  const padX = (w * paddingPercent) / 100;
+  const padY = (h * paddingPercent) / 100;
+  return {
+    xMin: xMin - padX,
+    xMax: xMax + padX,
+    yMin: yMin - padY,
+    yMax: yMax + padY,
+  };
+}
+
+function cropRegionByPercent(sourceCanvas, xMinPct, xMaxPct, yMinPct, yMaxPct) {
+  const { width, height } = sourceCanvas;
+  const clamp = (v) => Math.min(100, Math.max(0, v));
+  const x = (clamp(xMinPct) / 100) * width;
+  const y = (clamp(yMinPct) / 100) * height;
+  const w = ((clamp(xMaxPct) - clamp(xMinPct)) / 100) * width;
+  const h = ((clamp(yMaxPct) - clamp(yMinPct)) / 100) * height;
+
+  const cropCanvas = document.createElement("canvas");
+  cropCanvas.width = Math.max(1, Math.round(w));
+  cropCanvas.height = Math.max(1, Math.round(h));
+  const ctx = cropCanvas.getContext("2d");
+  ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, cropCanvas.width, cropCanvas.height);
+  return cropCanvas;
+}
+
+// 把來源畫布「Fit」進正方形畫布（等比縮放+置中補黑邊），對應訓練時的前處理方式
+function letterboxToSquare(sourceCanvas, size) {
+  const { width, height } = sourceCanvas;
+  const scale = size / Math.max(width, height);
+  const newW = Math.round(width * scale);
+  const newH = Math.round(height * scale);
+  const padLeft = Math.floor((size - newW) / 2);
+  const padTop = Math.floor((size - newH) / 2);
+
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = size;
+  outCanvas.height = size;
+  const ctx = outCanvas.getContext("2d");
+  ctx.fillStyle = "black";
+  ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(sourceCanvas, 0, 0, width, height, padLeft, padTop, newW, newH);
+
+  return { canvas: outCanvas, scale, padLeft, padTop };
+}
+
 // 方向箭頭元件
 function DirectionArrow({ direction }) {
   if (direction === "near" || direction === "far") {
@@ -397,14 +465,12 @@ export default function CameraModule() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const modelRef = useRef(null);
+  const charModelRef = useRef(null); // 🔧 新增：車牌字元辨識模型
   const inputCanvasRef = useRef(null);
   const intervalRef = useRef(null);
 
   const orientationOkRef = useRef(true);
   const liveBlurOkRef = useRef(true);
-  const positionHintRef = useRef(null);
-  const needsDetectionRef = useRef(true);
-  const distanceHintRef = useRef(null);
   const stageRef = useRef(FLOW_STAGE.SHOOTING);
   const canAutoCaptureRef = useRef(false);
 
@@ -420,6 +486,8 @@ export default function CameraModule() {
   const [status, setStatus] = useState(CAMERA_STATUS.IDLE);
   const [modelReady, setModelReady] = useState(false);
   const [modelError, setModelError] = useState(false);
+  const [charModelReady, setCharModelReady] = useState(false); // 🔧 新增
+  const [charModelError, setCharModelError] = useState(false); // 🔧 新增
   const [detections, setDetections] = useState({});
   const [orientationOk, setOrientationOk] = useState(true);
   const [orientationIssues, setOrientationIssues] = useState({ betaBad: false, gammaBad: false });
@@ -434,11 +502,10 @@ export default function CameraModule() {
   const [positionIndex, setPositionIndex] = useState(0);
   const [capturedPhotos, setCapturedPhotos] = useState([]); // [{position, dataUrl}]
   const [previewPhoto, setPreviewPhoto] = useState(null);   // {position, dataUrl}
-  const [lastCaptureSnapshot, setLastCaptureSnapshot] = useState(null); // 拍照當下的框線快照
-  const [retakeReference, setRetakeReference] = useState(null); // 重拍時顯示的參考框
   const [stableCountdownActive, setStableCountdownActive] = useState(false);
   const [reviewIndex, setReviewIndex] = useState(0); // 逐張比對車損標記時，目前顯示第幾張
   const [isSharing, setIsSharing] = useState(false); // 分享處理中，避免重複點擊
+  const [ocrResult, setOcrResult] = useState(null); // 🔧 新增：{ text, confidence }
 
   const currentPosition = POSITION_SEQUENCE[positionIndex];
 
@@ -549,6 +616,24 @@ export default function CameraModule() {
     return () => { cancelled = true; };
   }, []);
 
+  // 🔧 新增：載入車牌字元辨識模型
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const charModel = await tf.loadGraphModel(CHAR_MODEL_URL);
+        if (!cancelled) {
+          charModelRef.current = charModel;
+          setCharModelReady(true);
+        }
+      } catch (err) {
+        console.error("字元辨識模型載入失敗：", err);
+        if (!cancelled) setCharModelError(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     if (status !== CAMERA_STATUS.GRANTED) return;
 
@@ -645,11 +730,8 @@ export default function CameraModule() {
     if (!orientationOkRef.current || stageRef.current !== FLOW_STAGE.SHOOTING) {
       setDetections({});
       setPositionHint(null);
-      positionHintRef.current = null;
       setDistanceHint(null);
-      distanceHintRef.current = null;
       setNeedsDetection(true);
-      needsDetectionRef.current = true;
       return;
     }
 
@@ -738,11 +820,8 @@ export default function CameraModule() {
       const { positionHint: posHint, distanceHint: distHint, incomplete } =
         evaluatePositionAndDistance(rawResults, currentPosition);
       setPositionHint(posHint);
-      positionHintRef.current = posHint;
       setDistanceHint(distHint);
-      distanceHintRef.current = distHint;
       setNeedsDetection(incomplete);
-      needsDetectionRef.current = incomplete;
     });
   }, [currentPosition]);
 
@@ -751,6 +830,96 @@ export default function CameraModule() {
     intervalRef.current = setInterval(runInference, INFERENCE_INTERVAL_MS);
     return () => clearInterval(intervalRef.current);
   }, [status, modelReady, stage, runInference]);
+
+  // 🔧 新增：車牌字元辨識核心邏輯（含多實例解析 + NMS，車牌字元可重複出現，不能用單類別找最高分的寫法）
+  const recognizePlateCharacters = useCallback(async (sourceCanvas, plateDetection) => {
+    const charModel = charModelRef.current;
+    if (!charModel || !plateDetection) return null;
+
+    const expanded = expandBoxByPercent(
+      plateDetection.xMinPct,
+      plateDetection.xMaxPct,
+      plateDetection.yMinPct,
+      plateDetection.yMaxPct,
+      CHAR_CROP_PADDING_PERCENT
+    );
+    const plateCanvas = cropRegionByPercent(
+      sourceCanvas,
+      expanded.xMin,
+      expanded.xMax,
+      expanded.yMin,
+      expanded.yMax
+    );
+
+    const { canvas: inputCanvas, scale, padLeft, padTop } = letterboxToSquare(plateCanvas, CHAR_INPUT_SIZE);
+
+    const rawBoxesData = tf.tidy(() => {
+      const inputTensor = tf.browser.fromPixels(inputCanvas).toFloat().div(255.0).expandDims(0);
+      const output = charModel.execute(inputTensor);
+      const parsed = output.squeeze([0]).transpose([1, 0]); // [8400, 4+33]
+      return parsed.arraySync();
+    });
+
+    // 逐列取「該框信心最高的 class」，不是逐 class 找最高分（同一字元會在車牌上重複出現）
+    const candidates = [];
+    for (let i = 0; i < rawBoxesData.length; i++) {
+      const row = rawBoxesData[i];
+      let bestClassId = -1;
+      let bestConf = 0;
+      for (let c = 0; c < CHAR_CLASS_NAMES.length; c++) {
+        const conf = row[4 + c];
+        if (conf > bestConf) {
+          bestConf = conf;
+          bestClassId = c;
+        }
+      }
+      if (bestConf > CHAR_CONFIDENCE_THRESHOLD) {
+        const [cx, cy, w, h] = row;
+        const x1 = cx - w / 2;
+        const y1 = cy - h / 2;
+        const x2 = cx + w / 2;
+        const y2 = cy + h / 2;
+        candidates.push({ classId: bestClassId, conf: bestConf, x1, y1, x2, y2 });
+      }
+    }
+
+    if (candidates.length === 0) return null;
+
+    // NMS 去除重疊框（tf.image.nonMaxSuppressionAsync 要求 [y1, x1, y2, x2] 順序）
+    const boxesTensor = tf.tensor2d(candidates.map((c) => [c.y1, c.x1, c.y2, c.x2]));
+    const scoresTensor = tf.tensor1d(candidates.map((c) => c.conf));
+
+    const nmsIndices = await tf.image.nonMaxSuppressionAsync(
+      boxesTensor,
+      scoresTensor,
+      50,
+      CHAR_NMS_IOU_THRESHOLD,
+      CHAR_CONFIDENCE_THRESHOLD
+    );
+    const keepIndices = await nmsIndices.array();
+    boxesTensor.dispose();
+    scoresTensor.dispose();
+    nmsIndices.dispose();
+
+    // 依 x 座標（還原回裁切後座標系）排序，重建車牌字串
+    const kept = keepIndices.map((idx) => {
+      const c = candidates[idx];
+      const realX1 = (c.x1 - padLeft) / scale;
+      const realX2 = (c.x2 - padLeft) / scale;
+      return {
+        char: CHAR_CLASS_NAMES[c.classId],
+        conf: c.conf,
+        xCenter: (realX1 + realX2) / 2,
+      };
+    });
+
+    kept.sort((a, b) => a.xCenter - b.xCenter);
+
+    const text = kept.map((k) => k.char).join("");
+    const avgConf = kept.reduce((sum, k) => sum + k.conf, 0) / kept.length;
+
+    return { text, confidence: avgConf };
+  }, []);
 
   // 模組 E：只負責拍照存進暫存，進入預覽畫面，不做任何存檔/上傳動作
   const takePhoto = useCallback(() => {
@@ -779,15 +948,19 @@ export default function CameraModule() {
     const outputCanvas = downscaleCanvasIfNeeded(canvas, MAX_OUTPUT_LONG_EDGE);
     const photoDataUrl = outputCanvas.toDataURL("image/jpeg", 0.9);
 
-    // 快照當下的偵測框與提示文字，供之後選擇「重新拍攝」時顯示參考
-    setLastCaptureSnapshot({
-      detections: detectionsRef.current,
-      hint: positionHintRef.current || distanceHintRef.current,
-    });
-
     setPreviewPhoto({ position: currentPosition, dataUrl: photoDataUrl });
     setStage(FLOW_STAGE.PREVIEW);
-  }, [currentPosition]);
+
+    // 🔧 新增：非同步跑字元辨識，不阻擋預覽畫面顯示
+    setOcrResult(null);
+    if (charModelReady && detectionsRef.current["license_plate"]) {
+      recognizePlateCharacters(outputCanvas, detectionsRef.current["license_plate"])
+        .then((result) => {
+          if (result) setOcrResult(result);
+        })
+        .catch((err) => console.error("字元辨識發生錯誤：", err));
+    }
+  }, [currentPosition, charModelReady, recognizePlateCharacters]);
 
   // 模組 E：使用者按「確認保留」——只把照片存進暫存陣列並前進，
   // 不在這裡存相簿（相簿存檔集中在四張都比對完之後，DOWNLOAD_PROMPT 那一步）
@@ -803,7 +976,6 @@ export default function CameraModule() {
       console.error("上傳失敗（目前為 mock，可忽略）：", err);
     });
 
-    setRetakeReference(null);
     setPreviewPhoto(null);
 
     if (confirmedIndex >= POSITION_SEQUENCE.length - 1) {
@@ -876,8 +1048,7 @@ export default function CameraModule() {
     setPositionIndex(0);
     setCapturedPhotos([]);
     setPreviewPhoto(null);
-    setLastCaptureSnapshot(null);
-    setRetakeReference(null);
+    setOcrResult(null);
     setReviewIndex(0);
     setIsSharing(false);
     stableSinceRef.current = null;
@@ -892,8 +1063,7 @@ export default function CameraModule() {
     setPositionIndex(0);
     setCapturedPhotos([]);
     setPreviewPhoto(null);
-    setLastCaptureSnapshot(null);
-    setRetakeReference(null);
+    setOcrResult(null);
     setReviewIndex(0);
     setIsSharing(false);
     stableSinceRef.current = null;
@@ -1013,14 +1183,6 @@ export default function CameraModule() {
                   fill="none" stroke={det.aligned ? "#00ff00" : "#ff9900"} strokeWidth="3"
                 />
               ))}
-              {/* 重新拍攝參考框：灰色虛線，重現上次拍攝當下的偵測位置 */}
-              {retakeReference && Object.entries(retakeReference.detections).map(([key, det]) => (
-                <rect
-                  key={`ref-${key}`} x={`${det.xMinPct}%`} y={`${det.yMinPct}%`}
-                  width={`${det.xMaxPct - det.xMinPct}%`} height={`${det.yMaxPct - det.yMinPct}%`}
-                  fill="none" stroke="#aaaaaa" strokeWidth="2" strokeDasharray="3,3" strokeOpacity="0.7"
-                />
-              ))}
             </svg>
 
             {!orientationOk && (
@@ -1062,12 +1224,6 @@ export default function CameraModule() {
               </div>
             )}
 
-            {retakeReference && (
-              <div style={styles.retakeReferenceBanner}>
-                <span>灰色虛線框為上次拍攝位置參考</span>
-              </div>
-            )}
-
             <button style={styles.captureButton} onClick={takePhoto}>
               <div style={styles.captureButtonInner} />
             </button>
@@ -1089,6 +1245,12 @@ export default function CameraModule() {
         <div style={styles.previewContainer}>
           <img src={previewPhoto.dataUrl} alt="拍攝預覽" style={styles.previewImage} />
           <div style={styles.previewLabel}>{GUIDE_TEMPLATES[previewPhoto.position]?.label}</div>
+          {/* 🔧 新增：車牌字元辨識結果顯示 */}
+          {ocrResult && (
+            <div style={styles.previewLabel}>
+              車牌辨識：{ocrResult.text}（信心 {ocrResult.confidence.toFixed(2)}）
+            </div>
+          )}
           <div style={styles.previewButtonRow}>
             <button style={styles.retakeButton} onClick={retakePhoto}>重新拍攝</button>
             <button style={styles.confirmButton} onClick={confirmPhoto}>確認保留</button>
@@ -1332,20 +1494,6 @@ const styles = {
     zIndex: 25,
     pointerEvents: "none",
   },
-  retakeReferenceBanner: {
-    position: "absolute",
-    top: 40,
-    left: "50%",
-    transform: "translateX(-50%)",
-    backgroundColor: "rgba(0, 0, 0, 0.6)",
-    color: "#aaaaaa",
-    padding: "4px 10px",
-    borderRadius: "12px",
-    fontSize: "12px",
-    whiteSpace: "nowrap",
-    zIndex: 20,
-    pointerEvents: "none",
-  },
   debugInfo: {
     position: "absolute",
     top: 8,
@@ -1426,7 +1574,6 @@ const styles = {
     fontWeight: "bold",
     cursor: "pointer",
   },
-  // 模組 E：逐張比對車損標記畫面——照片鋪滿，按鈕疊在下方（拍攝時已把主物件置中，下方位置不影響判讀）
   reviewPhotoContainer: {
     position: "relative",
     width: "100%",
