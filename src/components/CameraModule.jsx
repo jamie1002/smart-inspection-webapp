@@ -37,19 +37,30 @@ const VERTICAL_HINT_SIGN = 1;
 // 存檔輸出設定
 const MAX_OUTPUT_LONG_EDGE = 1920; // 只在超過此上限時等比例縮小，不放大
 
+// 🔧 模型輸入與拍照存檔共用的裁切比例（= APP 顯示畫面的比例）
+const DISPLAY_CROP_RATIO = 9 / 16;
+
 // ============================================
 // 模組 E：自動快門與流程控制設定
 // ============================================
 // 🔧 可自行修改測試：五個對齊條件都通過後，要「連續穩定」多久才自動觸發快門
 const CAPTURE_STABLE_DURATION_MS = 1000;
 
+// 🔧 模擬等待後端 AI 辨識車損的時間，之後接後端時改成實際等待 API 回應，這個常數可移除
+const ANALYZING_DURATION_MS = 2000;
+
 // 拍攝順序：左前 → 左後 → 右後 → 右前
 const POSITION_SEQUENCE = ["front_left", "left_rear", "right_rear", "right_front"];
 
 const FLOW_STAGE = {
-  SHOOTING: "shooting", // 取景/等待對齊/自動快門
-  PREVIEW: "preview",   // 剛拍完，等使用者確認保留或重拍
-  COMPLETE: "complete", // 四張都確認保留完成
+  SHOOTING: "shooting",             // 取景/等待對齊/自動快門
+  PREVIEW: "preview",               // 剛拍完，等使用者確認保留或重拍
+  ANALYZING: "analyzing",           // 模擬等待後端 AI 辨識車況
+  REVIEW_INTRO: "review_intro",     // 提示使用者即將比對車損標記
+  REVIEWING: "reviewing",           // 逐張比對確認車損標記
+  DOWNLOAD_PROMPT: "download_prompt", // 詢問是否下載照片到相簿
+  MANUAL_SAVE: "manual_save",       // 裝置不支援分享 API 時，引導使用者長按儲存
+  COMPLETE: "complete",             // 全部完成
 };
 
 const GUIDE_TEMPLATES = {
@@ -65,13 +76,13 @@ const GUIDE_TEMPLATES = {
   },
   right_rear: {
     label: "右後",
-    licensePlate: { xMin: 10.7, xMax: 25.8, yMin: 51.0, yMax: 58.1 },
-    wheel: { xMin: 70.3, xMax: 84.2, yMin: 57.2, yMax: 72.4 },
+    licensePlate: { xMin: 11.6, xMax: 22.8, yMin: 50.9, yMax: 56.2 },
+    wheel: { xMin: 63.5, xMax: 79.3, yMin: 56.1, yMax: 70.6 },
   },
   right_front: {
     label: "右前",
-    licensePlate: { xMin: 77.9, xMax: 92.1, yMin: 56.4, yMax: 63.5 },
-    wheel: { xMin: 19.1, xMax: 31.2, yMin: 51.2, yMax: 66.0 },
+    licensePlate: { xMin: 81.3, xMax: 92.6, yMin: 53.7, yMax: 60.6 },
+    wheel: { xMin: 22.1, xMax: 36.7, yMin: 49.6, yMax: 64.4 },
   },
 };
 
@@ -249,6 +260,26 @@ function downscaleCanvasIfNeeded(sourceCanvas, maxLongEdge) {
   return outCanvas;
 }
 
+// 🔧 模組 E 簡化：計算「APP 顯示畫面」(9:16 裁切) 的裁切尺寸與是否為橫向 feed
+// takePhoto() 跟 runInference() 都呼叫這支，確保拍照存檔跟模型輸入用同一套裁切邏輯
+function computeDisplayCropGeometry(rawW, rawH) {
+  const isLandscapeFeed = rawW > rawH;
+  const logicalW = isLandscapeFeed ? rawH : rawW;
+  const logicalH = isLandscapeFeed ? rawW : rawH;
+
+  let cropW = logicalW;
+  let cropH = logicalH;
+  const currentRatio = logicalW / logicalH;
+
+  if (currentRatio > DISPLAY_CROP_RATIO) {
+    cropW = logicalH * DISPLAY_CROP_RATIO;
+  } else {
+    cropH = logicalW / DISPLAY_CROP_RATIO;
+  }
+
+  return { isLandscapeFeed, cropW, cropH };
+}
+
 // 方向箭頭元件
 function DirectionArrow({ direction }) {
   if (direction === "near" || direction === "far") {
@@ -269,8 +300,10 @@ function DirectionArrow({ direction }) {
   );
 }
 
-// 嘗試鎖定對焦（不碰 zoom，避免 iOS 被迫切換到超廣角/微距鏡頭）
-async function tryLockFocus(stream) {
+// 設定相機鏡頭：明確鎖定 1x 主鏡頭（避免部分 Android 裝置變焦到極端值時切換到超廣角/微距鏡頭），
+// 對焦改用連續自動對焦（不再鎖定對焦距離）。
+// 注意：getCapabilities() 在 iOS Safari 上不存在，這整段對 iOS 完全不生效（安全，因為 iOS 本來就預設主鏡頭）
+async function tryConfigureCamera(stream) {
   const track = stream.getVideoTracks()[0];
   if (!track || typeof track.getCapabilities !== "function") return;
 
@@ -284,19 +317,27 @@ async function tryLockFocus(stream) {
 
   const advanced = [];
 
-  if (capabilities.focusMode && capabilities.focusMode.includes("manual")) {
-    const settings = track.getSettings();
-    advanced.push({
-      focusMode: "manual",
-      focusDistance: settings.focusDistance ?? capabilities.focusDistance?.min,
-    });
+  // 明確鎖定變焦在 1x（不是 zoom.min，避免部分機型的 min 值對應到超廣角鏡頭）
+  if (
+    capabilities.zoom &&
+    typeof capabilities.zoom.min === "number" &&
+    typeof capabilities.zoom.max === "number" &&
+    capabilities.zoom.min <= 1 &&
+    capabilities.zoom.max >= 1
+  ) {
+    advanced.push({ zoom: 1 });
+  }
+
+  // 明確指定連續自動對焦（多數裝置預設本來就是這個，這裡明確指定較保險）
+  if (capabilities.focusMode && capabilities.focusMode.includes("continuous")) {
+    advanced.push({ focusMode: "continuous" });
   }
 
   if (advanced.length > 0) {
     try {
       await track.applyConstraints({ advanced });
     } catch (err) {
-      console.warn("鎖定對焦失敗（可能裝置不支援，可忽略）：", err);
+      console.warn("相機鏡頭設定失敗（可能裝置不支援，可忽略）：", err);
     }
   }
 }
@@ -315,6 +356,41 @@ async function uploadPhoto(sessionId, position, sequenceIndex, photoDataUrl) {
     `[mock upload] session=${sessionId} position=${position} index=${sequenceIndex} size=${photoDataUrl.length}`
   );
   return Promise.resolve({ ok: true, mock: true });
+}
+
+// 🔧 唯一能保證存進系統相簿的方式：navigator.share() 讓使用者在系統面板點「儲存到照片」。
+// 回傳三種結果：
+//   "shared"      分享成功（使用者已選擇儲存或其他分享目標）
+//   "cancelled"   使用者主動取消分享面板，不當作錯誤，停留原畫面即可
+//   "unsupported" 裝置不支援 / 呼叫失敗，需要改用「引導長按儲存」畫面
+async function trySharePhotos(photos) {
+  if (!navigator.share) return "unsupported";
+
+  try {
+    const timestamp = Date.now();
+    const files = await Promise.all(
+      photos.map(async (photo, index) => {
+        const res = await fetch(photo.dataUrl);
+        const blob = await res.blob();
+        return new File([blob], `car_detect_${photo.position}_${timestamp}_${index}.jpg`, {
+          type: "image/jpeg",
+        });
+      })
+    );
+
+    if (!(navigator.canShare && navigator.canShare({ files }))) {
+      return "unsupported";
+    }
+
+    await navigator.share({ files, title: "車況檢測照片" });
+    return "shared";
+  } catch (err) {
+    if (err.name === "AbortError") {
+      return "cancelled";
+    }
+    console.warn("分享失敗，改用長按儲存引導：", err);
+    return "unsupported";
+  }
 }
 
 export default function CameraModule() {
@@ -361,7 +437,8 @@ export default function CameraModule() {
   const [lastCaptureSnapshot, setLastCaptureSnapshot] = useState(null); // 拍照當下的框線快照
   const [retakeReference, setRetakeReference] = useState(null); // 重拍時顯示的參考框
   const [stableCountdownActive, setStableCountdownActive] = useState(false);
-  const [saveError, setSaveError] = useState(null);
+  const [reviewIndex, setReviewIndex] = useState(0); // 逐張比對車損標記時，目前顯示第幾張
+  const [isSharing, setIsSharing] = useState(false); // 分享處理中，避免重複點擊
 
   const currentPosition = POSITION_SEQUENCE[positionIndex];
 
@@ -423,7 +500,7 @@ export default function CameraModule() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
-      await tryLockFocus(stream);
+      await tryConfigureCamera(stream);
       if (!sessionIdRef.current) {
         sessionIdRef.current = generateSessionId();
       }
@@ -438,7 +515,7 @@ export default function CameraModule() {
     }
   }, []);
 
-  // 相機串流附加到 video 元素：stage 切回 SHOOTING 時（例如重拍/下一張/完成後重新檢測）
+  // 相機串流附加到 video 元素：stage 切回 SHOOTING 時（例如重拍/下一張/重新檢測）
   // video 元素會重新掛載，需要重新指定 srcObject
   useEffect(() => {
     if (
@@ -586,14 +663,12 @@ export default function CameraModule() {
     const rawH = video.videoHeight;
     if (!rawW || !rawH) return;
 
-    const isLandscapeFeed = rawW > rawH;
+    // 模型輸入畫面採用「APP 顯示畫面」(9:16 裁切)，跟 takePhoto() 用同一套裁切幾何
+    const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
-    const logicalW = isLandscapeFeed ? rawH : rawW;
-    const logicalH = isLandscapeFeed ? rawW : rawH;
-
-    const scale = 640 / Math.max(logicalW, logicalH);
-    const newW = Math.round(logicalW * scale);
-    const newH = Math.round(logicalH * scale);
+    const scale = 640 / Math.max(cropW, cropH);
+    const newW = Math.round(cropW * scale);
+    const newH = Math.round(cropH * scale);
     const padLeft = Math.floor((640 - newW) / 2);
     const padTop = Math.floor((640 - newH) / 2);
 
@@ -602,13 +677,17 @@ export default function CameraModule() {
     ctx.fillRect(0, 0, 640, 640);
 
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(padLeft, padTop, newW, newH);
+    ctx.clip();
+
+    ctx.translate(320, 320);
     if (isLandscapeFeed) {
-      ctx.translate(320, 320);
       ctx.rotate(Math.PI / 2);
-      ctx.drawImage(video, 0, 0, rawW, rawH, -newH / 2, -newW / 2, newH, newW);
-    } else {
-      ctx.drawImage(video, 0, 0, rawW, rawH, padLeft, padTop, newW, newH);
     }
+    ctx.scale(scale, scale);
+    ctx.drawImage(video, -rawW / 2, -rawH / 2, rawW, rawH);
+
     ctx.restore();
 
     tf.tidy(() => {
@@ -639,32 +718,17 @@ export default function CameraModule() {
           const x2 = best.cx + best.w / 2;
           const y2 = best.cy + best.h / 2;
 
-          const realX1 = (x1 - padLeft) / scale;
-          const realY1 = (y1 - padTop) / scale;
-          const realX2 = (x2 - padLeft) / scale;
-          const realY2 = (y2 - padTop) / scale;
-
-          const cssW = video.clientWidth;
-          const cssH = video.clientHeight;
-
-          const scaleCover = Math.max(cssW / logicalW, cssH / logicalH);
-          const renderedW = logicalW * scaleCover;
-          const renderedH = logicalH * scaleCover;
-
-          const offsetX = (renderedW - cssW) / 2;
-          const offsetY = (renderedH - cssH) / 2;
-
-          const screenX1 = realX1 * scaleCover - offsetX;
-          const screenY1 = realY1 * scaleCover - offsetY;
-          const screenX2 = realX2 * scaleCover - offsetX;
-          const screenY2 = realY2 * scaleCover - offsetY;
+          const cropX1 = (x1 - padLeft) / scale;
+          const cropY1 = (y1 - padTop) / scale;
+          const cropX2 = (x2 - padLeft) / scale;
+          const cropY2 = (y2 - padTop) / scale;
 
           rawResults[CLASS_NAMES[classId]] = {
             conf: best.conf,
-            xMinPct: (screenX1 / cssW) * 100,
-            xMaxPct: (screenX2 / cssW) * 100,
-            yMinPct: (screenY1 / cssH) * 100,
-            yMaxPct: (screenY2 / cssH) * 100,
+            xMinPct: (cropX1 / cropW) * 100,
+            xMaxPct: (cropX2 / cropW) * 100,
+            yMinPct: (cropY1 / cropH) * 100,
+            yMaxPct: (cropY2 / cropH) * 100,
           };
         }
       }
@@ -688,37 +752,6 @@ export default function CameraModule() {
     return () => clearInterval(intervalRef.current);
   }, [status, modelReady, stage, runInference]);
 
-  const savePhotoToDevice = useCallback(async (photoDataUrl) => {
-    const fileName = `car_detect_${Date.now()}.jpg`;
-
-    if (navigator.share) {
-      try {
-        const res = await fetch(photoDataUrl);
-        const blob = await res.blob();
-        const file = new File([blob], fileName, { type: "image/jpeg" });
-
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          await navigator.share({
-            files: [file],
-            title: "車況檢測照片",
-          });
-          console.log("照片儲存/分享成功！");
-          return;
-        }
-      } catch (err) {
-        console.log("使用者取消分享或發生錯誤：", err);
-        return;
-      }
-    }
-
-    const link = document.createElement("a");
-    link.href = photoDataUrl;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }, []);
-
   // 模組 E：只負責拍照存進暫存，進入預覽畫面，不做任何存檔/上傳動作
   const takePhoto = useCallback(() => {
     if (stageRef.current !== FLOW_STAGE.SHOOTING) return;
@@ -730,21 +763,7 @@ export default function CameraModule() {
 
     const rawW = video.videoWidth;
     const rawH = video.videoHeight;
-    const isLandscapeFeed = rawW > rawH;
-
-    const logicalW = isLandscapeFeed ? rawH : rawW;
-    const logicalH = isLandscapeFeed ? rawW : rawH;
-
-    let cropW = logicalW;
-    let cropH = logicalH;
-    const targetRatio = 9 / 16;
-    const currentRatio = logicalW / logicalH;
-
-    if (currentRatio > targetRatio) {
-      cropW = logicalH * targetRatio;
-    } else {
-      cropH = logicalW / targetRatio;
-    }
+    const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
     const canvas = document.createElement("canvas");
     canvas.width = cropW;
@@ -766,24 +785,18 @@ export default function CameraModule() {
       hint: positionHintRef.current || distanceHintRef.current,
     });
 
-    setSaveError(null);
     setPreviewPhoto({ position: currentPosition, dataUrl: photoDataUrl });
     setStage(FLOW_STAGE.PREVIEW);
   }, [currentPosition]);
 
-  // 模組 E：使用者按「確認保留」——這是點擊事件，帶有使用者手勢，
-  // 可以安全呼叫 navigator.share()（自動倒數/背景計時器內絕對不能呼叫這個）
+  // 模組 E：使用者按「確認保留」——只把照片存進暫存陣列並前進，
+  // 不在這裡存相簿（相簿存檔集中在四張都比對完之後，DOWNLOAD_PROMPT 那一步）
   const confirmPhoto = useCallback(() => {
     if (!previewPhoto) return;
     const photo = previewPhoto;
     const confirmedIndex = positionIndex;
 
     setCapturedPhotos((prev) => [...prev, photo]);
-
-    savePhotoToDevice(photo.dataUrl).catch((err) => {
-      console.error("儲存照片失敗：", err);
-      setSaveError("相簿儲存失敗，請確認裝置分享功能是否正常");
-    });
 
     // 背景上傳，不阻塞流程（目前是 mock，之後接後端一樣這樣呼叫）
     uploadPhoto(sessionIdRef.current, photo.position, confirmedIndex, photo.dataUrl).catch((err) => {
@@ -794,19 +807,68 @@ export default function CameraModule() {
     setPreviewPhoto(null);
 
     if (confirmedIndex >= POSITION_SEQUENCE.length - 1) {
-      setStage(FLOW_STAGE.COMPLETE);
+      setStage(FLOW_STAGE.ANALYZING);
     } else {
       setPositionIndex(confirmedIndex + 1);
       setStage(FLOW_STAGE.SHOOTING);
     }
-  }, [previewPhoto, positionIndex, savePhotoToDevice]);
+  }, [previewPhoto, positionIndex]);
 
-  // 模組 E：使用者按「重新拍攝」——回到同一個方位，並顯示上次拍攝當下的框線當參考
+  // 模組 E：使用者按「重新拍攝」——回到同一個方位重新取景
   const retakePhoto = useCallback(() => {
-    setRetakeReference(lastCaptureSnapshot);
     setPreviewPhoto(null);
     setStage(FLOW_STAGE.SHOOTING);
-  }, [lastCaptureSnapshot]);
+  }, []);
+
+  // 模組 E：模擬等待後端 AI 辨識，時間到自動進入「請比對車損標記」畫面
+  useEffect(() => {
+    if (stage !== FLOW_STAGE.ANALYZING) return;
+    const timerId = setTimeout(() => {
+      setStage(FLOW_STAGE.REVIEW_INTRO);
+    }, ANALYZING_DURATION_MS);
+    return () => clearTimeout(timerId);
+  }, [stage]);
+
+  // 使用者按「開始確認」，從第一張開始逐張比對
+  const startReview = useCallback(() => {
+    setReviewIndex(0);
+    setStage(FLOW_STAGE.REVIEWING);
+  }, []);
+
+  // 使用者對目前這張按「確認無誤」，前進下一張，最後一張確認完進入下載詢問
+  const confirmReviewPhoto = useCallback(() => {
+    if (reviewIndex >= capturedPhotos.length - 1) {
+      setStage(FLOW_STAGE.DOWNLOAD_PROMPT);
+    } else {
+      setReviewIndex((prev) => prev + 1);
+    }
+  }, [reviewIndex, capturedPhotos.length]);
+
+  // 使用者選擇「是」要下載照片：這是點擊事件，帶有使用者手勢，可以安全呼叫 navigator.share()
+  const handleDownloadConfirm = useCallback(async () => {
+    if (isSharing) return;
+    setIsSharing(true);
+    const result = await trySharePhotos(capturedPhotos);
+    setIsSharing(false);
+
+    if (result === "shared") {
+      setStage(FLOW_STAGE.COMPLETE);
+    } else if (result === "cancelled") {
+      // 使用者主動取消分享面板，停留在下載詢問畫面，讓使用者可以再按一次
+    } else {
+      setStage(FLOW_STAGE.MANUAL_SAVE);
+    }
+  }, [capturedPhotos, isSharing]);
+
+  // 使用者選擇「否」，跳過儲存直接完成
+  const handleDownloadSkip = useCallback(() => {
+    setStage(FLOW_STAGE.COMPLETE);
+  }, []);
+
+  // 手動儲存引導畫面按「完成」，代表使用者已自行長按儲存
+  const finishManualSave = useCallback(() => {
+    setStage(FLOW_STAGE.COMPLETE);
+  }, []);
 
   // 模組 E：完成畫面按「重新檢測」——整個流程從頭開始（測試用），相機不需要重新授權
   const resetFlow = useCallback(() => {
@@ -816,7 +878,8 @@ export default function CameraModule() {
     setPreviewPhoto(null);
     setLastCaptureSnapshot(null);
     setRetakeReference(null);
-    setSaveError(null);
+    setReviewIndex(0);
+    setIsSharing(false);
     stableSinceRef.current = null;
     setStableCountdownActive(false);
     setStage(FLOW_STAGE.SHOOTING);
@@ -831,7 +894,8 @@ export default function CameraModule() {
     setPreviewPhoto(null);
     setLastCaptureSnapshot(null);
     setRetakeReference(null);
-    setSaveError(null);
+    setReviewIndex(0);
+    setIsSharing(false);
     stableSinceRef.current = null;
     setStableCountdownActive(false);
     setStage(FLOW_STAGE.SHOOTING);
@@ -850,7 +914,7 @@ export default function CameraModule() {
     canAutoCaptureRef.current = canAutoCapture;
   }, [canAutoCapture]);
 
-  // 模組 E：自動快門穩定計時——canCapture 持續為 true 達 CAPTURE_STABLE_DURATION_MS 就自動拍照
+  // 模組 E：自動快門穩定計時——canAutoCapture 持續為 true 達 CAPTURE_STABLE_DURATION_MS 就自動拍照
   useEffect(() => {
     if (status !== CAMERA_STATUS.GRANTED || stage !== FLOW_STAGE.SHOOTING) {
       stableSinceRef.current = null;
@@ -884,6 +948,7 @@ export default function CameraModule() {
   }, [status, stage, takePhoto]);
 
   const template = GUIDE_TEMPLATES[currentPosition];
+  const reviewPhoto = capturedPhotos[reviewIndex];
 
   return (
     <div style={styles.pageWrapper}>
@@ -960,8 +1025,8 @@ export default function CameraModule() {
 
             {!orientationOk && (
               <div style={styles.orientationWarning}>
-                {orientationIssues.betaBad && <p>請保持手機水平</p>}
-                {orientationIssues.gammaBad && <p>請直立鏡頭</p>}
+                {orientationIssues.betaBad && <p>請直立鏡頭</p>}
+                {orientationIssues.gammaBad && <p>請保持畫面水平</p>}
               </div>
             )}
 
@@ -1024,7 +1089,6 @@ export default function CameraModule() {
         <div style={styles.previewContainer}>
           <img src={previewPhoto.dataUrl} alt="拍攝預覽" style={styles.previewImage} />
           <div style={styles.previewLabel}>{GUIDE_TEMPLATES[previewPhoto.position]?.label}</div>
-          {saveError && <div style={styles.saveErrorText}>{saveError}</div>}
           <div style={styles.previewButtonRow}>
             <button style={styles.retakeButton} onClick={retakePhoto}>重新拍攝</button>
             <button style={styles.confirmButton} onClick={confirmPhoto}>確認保留</button>
@@ -1032,10 +1096,61 @@ export default function CameraModule() {
         </div>
       )}
 
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.ANALYZING && (
+        <div style={styles.centerScreen}>
+          <p style={styles.analyzingText}>請稍等，AI 辨識目前車況中...</p>
+        </div>
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.REVIEW_INTRO && (
+        <div style={styles.centerScreen}>
+          <p style={styles.analyzingText}>請比對標記的車損是否與現場相符</p>
+          <button style={styles.startButton} onClick={startReview}>開始確認</button>
+        </div>
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.REVIEWING && reviewPhoto && (
+        <div style={styles.reviewPhotoContainer}>
+          {/* 🔧 之後接後端時，這裡的 dataUrl 改成後端回傳的「車損標記後」照片，目前先用拍攝原圖代替 */}
+          <img src={reviewPhoto.dataUrl} alt="車損標記比對" style={styles.reviewPhotoImage} />
+          <div style={styles.reviewProgressBadge}>
+            {GUIDE_TEMPLATES[reviewPhoto.position]?.label}（第 {reviewIndex + 1} / {capturedPhotos.length} 張）
+          </div>
+          <button style={styles.reviewConfirmButton} onClick={confirmReviewPhoto}>確認無誤</button>
+        </div>
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.DOWNLOAD_PROMPT && (
+        <div style={styles.centerScreen}>
+          <p style={styles.analyzingText}>是否要將照片儲存到手機相簿？</p>
+          <div style={styles.previewButtonRow}>
+            <button style={styles.retakeButton} onClick={handleDownloadSkip} disabled={isSharing}>否</button>
+            <button style={styles.confirmButton} onClick={handleDownloadConfirm} disabled={isSharing}>
+              {isSharing ? "處理中..." : "是"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.MANUAL_SAVE && (
+        <div style={styles.completeContainer}>
+          <p style={styles.completeTitle}>此裝置無法自動跳出儲存選單</p>
+          <p style={styles.manualSaveHint}>請依序長按下方每張照片，選擇「儲存影像」或「加入照片」，即可存進手機相簿</p>
+          <div style={styles.thumbnailGrid}>
+            {capturedPhotos.map((p) => (
+              <div key={p.position} style={styles.thumbnailItem}>
+                <img src={p.dataUrl} alt={p.position} style={styles.thumbnailImage} />
+                <span style={styles.thumbnailLabel}>{GUIDE_TEMPLATES[p.position]?.label}</span>
+              </div>
+            ))}
+          </div>
+          <button style={styles.startButton} onClick={finishManualSave}>已完成儲存</button>
+        </div>
+      )}
+
       {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.COMPLETE && (
         <div style={styles.completeContainer}>
           <p style={styles.completeTitle}>四個角度拍攝完成</p>
-          {/* 🔧 之後接後端時，這裡改成顯示後端標記車損的分析結果圖，目前先用拍攝原圖代替 */}
           <div style={styles.thumbnailGrid}>
             {capturedPhotos.map((p) => (
               <div key={p.position} style={styles.thumbnailItem}>
@@ -1068,6 +1183,10 @@ const styles = {
     color: "#fff",
     textAlign: "center",
     padding: "24px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "16px",
   },
   startButton: {
     padding: "16px 32px",
@@ -1101,6 +1220,20 @@ const styles = {
     lineHeight: 1.6,
     maxWidth: "320px",
     margin: "0 auto",
+  },
+  analyzingText: {
+    color: "#fff",
+    fontSize: "17px",
+    fontWeight: "bold",
+    maxWidth: "300px",
+    lineHeight: 1.6,
+  },
+  manualSaveHint: {
+    color: "#ccc",
+    fontSize: "14px",
+    lineHeight: 1.6,
+    maxWidth: "300px",
+    textAlign: "center",
   },
   cameraContainer: {
     position: "relative",
@@ -1269,12 +1402,6 @@ const styles = {
     fontSize: "16px",
     fontWeight: "bold",
   },
-  saveErrorText: {
-    color: "#ff9900",
-    fontSize: "13px",
-    textAlign: "center",
-    maxWidth: "300px",
-  },
   previewButtonRow: {
     display: "flex",
     gap: "16px",
@@ -1298,6 +1425,50 @@ const styles = {
     color: "#000",
     fontWeight: "bold",
     cursor: "pointer",
+  },
+  // 模組 E：逐張比對車損標記畫面——照片鋪滿，按鈕疊在下方（拍攝時已把主物件置中，下方位置不影響判讀）
+  reviewPhotoContainer: {
+    position: "relative",
+    width: "100%",
+    height: "100%",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#000",
+  },
+  reviewPhotoImage: {
+    width: "100%",
+    height: "100%",
+    objectFit: "contain",
+  },
+  reviewProgressBadge: {
+    position: "absolute",
+    top: 16,
+    left: "50%",
+    transform: "translateX(-50%)",
+    backgroundColor: "rgba(0,0,0,0.6)",
+    color: "#fff",
+    padding: "4px 12px",
+    borderRadius: "4px",
+    fontSize: "13px",
+    fontWeight: "bold",
+    whiteSpace: "nowrap",
+    zIndex: 10,
+  },
+  reviewConfirmButton: {
+    position: "absolute",
+    bottom: "36px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    padding: "14px 40px",
+    fontSize: "16px",
+    borderRadius: "24px",
+    border: "none",
+    backgroundColor: "#00ff88",
+    color: "#000",
+    fontWeight: "bold",
+    cursor: "pointer",
+    zIndex: 10,
   },
   completeContainer: {
     width: "100%",

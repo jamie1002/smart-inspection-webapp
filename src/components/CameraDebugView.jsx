@@ -11,6 +11,29 @@ const CAMERA_STATUS = {
 
 const DRAW_INTERVAL_MS = 150;
 
+// 🔧 與 CameraModule.jsx 完全同步：模型輸入與拍照存檔共用的裁切比例（= APP 顯示畫面比例）
+const DISPLAY_CROP_RATIO = 9 / 16;
+
+// 🔧 與 CameraModule.jsx 的 computeDisplayCropGeometry() 完全同步，
+// 若正式功能那邊之後有調整，記得同步更新這裡，否則除錯畫面會失真
+function computeDisplayCropGeometry(rawW, rawH) {
+  const isLandscapeFeed = rawW > rawH;
+  const logicalW = isLandscapeFeed ? rawH : rawW;
+  const logicalH = isLandscapeFeed ? rawW : rawH;
+
+  let cropW = logicalW;
+  let cropH = logicalH;
+  const currentRatio = logicalW / logicalH;
+
+  if (currentRatio > DISPLAY_CROP_RATIO) {
+    cropW = logicalH * DISPLAY_CROP_RATIO;
+  } else {
+    cropH = logicalW / DISPLAY_CROP_RATIO;
+  }
+
+  return { isLandscapeFeed, cropW, cropH };
+}
+
 export default function CameraDebugView() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -84,18 +107,16 @@ export default function CameraDebugView() {
 
       // ============================================
       // 正方形視窗 1：模型輸入前處理畫面
-      // 完全比照 CameraModule.jsx 裡 runInference() 的前處理邏輯：
-      // 判斷 landscape feed → 旋轉 → 等比縮放到 640 → 置中補黑邊
+      // 🔧 完全比照 CameraModule.jsx 的 runInference() 前處理邏輯：
+      // 先裁切成 9:16（= APP 顯示畫面），旋轉修正，再等比縮放到 640 置中補黑邊
       // ============================================
       const modelCanvas = modelInputCanvasRef.current;
       if (modelCanvas) {
-        const isLandscapeFeed = rawW > rawH;
-        const logicalW = isLandscapeFeed ? rawH : rawW;
-        const logicalH = isLandscapeFeed ? rawW : rawH;
+        const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
-        const scale = 640 / Math.max(logicalW, logicalH);
-        const newW = Math.round(logicalW * scale);
-        const newH = Math.round(logicalH * scale);
+        const scale = 640 / Math.max(cropW, cropH);
+        const newW = Math.round(cropW * scale);
+        const newH = Math.round(cropH * scale);
         const padLeft = Math.floor((640 - newW) / 2);
         const padTop = Math.floor((640 - newH) / 2);
 
@@ -104,13 +125,17 @@ export default function CameraDebugView() {
         ctx.fillRect(0, 0, 640, 640);
 
         ctx.save();
+        ctx.beginPath();
+        ctx.rect(padLeft, padTop, newW, newH);
+        ctx.clip();
+
+        ctx.translate(320, 320);
         if (isLandscapeFeed) {
-          ctx.translate(320, 320);
           ctx.rotate(Math.PI / 2);
-          ctx.drawImage(video, 0, 0, rawW, rawH, -newH / 2, -newW / 2, newH, newW);
-        } else {
-          ctx.drawImage(video, 0, 0, rawW, rawH, padLeft, padTop, newW, newH);
         }
+        ctx.scale(scale, scale);
+        ctx.drawImage(video, -rawW / 2, -rawH / 2, rawW, rawH);
+
         ctx.restore();
       }
 
@@ -164,12 +189,12 @@ export default function CameraDebugView() {
 
           <div style={styles.squareRow}>
             <div style={styles.squareItem}>
-              <p style={styles.label}>② 模型輸入前處理畫面（640×640，含旋轉修正）</p>
+              <p style={styles.label}>② 模型輸入前處理畫面（9:16 裁切 + 旋轉修正後縮放到 640×640）</p>
               <canvas ref={modelInputCanvasRef} width={640} height={640} style={styles.squareCanvas} />
             </div>
 
             <div style={styles.squareItem}>
-              <p style={styles.label}>③ 感測器原始畫面（無旋轉修正，等比縮放補黑邊）</p>
+              <p style={styles.label}>③ 感測器原始畫面（無裁切、無旋轉修正，等比縮放補黑邊）</p>
               <canvas ref={rawFrameCanvasRef} width={320} height={320} style={styles.squareCanvas} />
             </div>
           </div>
