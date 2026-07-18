@@ -14,24 +14,19 @@ const DRAW_INTERVAL_MS = 150;
 // 🔧 與 CameraModule.jsx 完全同步：模型輸入與拍照存檔共用的裁切比例（= APP 顯示畫面比例）
 const DISPLAY_CROP_RATIO = 9 / 16;
 
-// 🔧 與 CameraModule.jsx 的 computeDisplayCropGeometry() 完全同步，
-// 若正式功能那邊之後有調整，記得同步更新這裡，否則除錯畫面會失真
+// 🔧 已移除旋轉修正邏輯：直接以感測器回報的原始寬高計算裁切尺寸
 function computeDisplayCropGeometry(rawW, rawH) {
-  const isLandscapeFeed = rawW > rawH;
-  const logicalW = isLandscapeFeed ? rawH : rawW;
-  const logicalH = isLandscapeFeed ? rawW : rawH;
-
-  let cropW = logicalW;
-  let cropH = logicalH;
-  const currentRatio = logicalW / logicalH;
+  let cropW = rawW;
+  let cropH = rawH;
+  const currentRatio = rawW / rawH;
 
   if (currentRatio > DISPLAY_CROP_RATIO) {
-    cropW = logicalH * DISPLAY_CROP_RATIO;
+    cropW = rawH * DISPLAY_CROP_RATIO;
   } else {
-    cropH = logicalW / DISPLAY_CROP_RATIO;
+    cropH = rawW / DISPLAY_CROP_RATIO;
   }
 
-  return { isLandscapeFeed, cropW, cropH };
+  return { cropW, cropH };
 }
 
 export default function CameraDebugView() {
@@ -107,12 +102,12 @@ export default function CameraDebugView() {
 
       // ============================================
       // 正方形視窗 1：模型輸入前處理畫面
-      // 🔧 完全比照 CameraModule.jsx 的 runInference() 前處理邏輯：
-      // 先裁切成 9:16（= APP 顯示畫面），旋轉修正，再等比縮放到 640 置中補黑邊
+      // 🔧 已移除旋轉修正：僅裁切成 9:16（= APP 顯示畫面），
+      // 再等比縮放到 640 置中補黑邊
       // ============================================
       const modelCanvas = modelInputCanvasRef.current;
       if (modelCanvas) {
-        const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
+        const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
         const scale = 640 / Math.max(cropW, cropH);
         const newW = Math.round(cropW * scale);
@@ -130,9 +125,6 @@ export default function CameraDebugView() {
         ctx.clip();
 
         ctx.translate(320, 320);
-        if (isLandscapeFeed) {
-          ctx.rotate(Math.PI / 2);
-        }
         ctx.scale(scale, scale);
         ctx.drawImage(video, -rawW / 2, -rawH / 2, rawW, rawH);
 
@@ -189,7 +181,7 @@ export default function CameraDebugView() {
 
           <div style={styles.squareRow}>
             <div style={styles.squareItem}>
-              <p style={styles.label}>② 模型輸入前處理畫面（9:16 裁切 + 旋轉修正後縮放到 640×640）</p>
+              <p style={styles.label}>② 模型輸入前處理畫面（9:16 裁切後縮放到 640×640，無旋轉修正）</p>
               <canvas ref={modelInputCanvasRef} width={640} height={640} style={styles.squareCanvas} />
             </div>
 

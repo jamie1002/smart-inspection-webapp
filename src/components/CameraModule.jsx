@@ -303,22 +303,19 @@ function downscaleCanvasIfNeeded(sourceCanvas, maxLongEdge) {
   return outCanvas;
 }
 
+// 🔧 已移除旋轉修正邏輯：直接以感測器回報的原始寬高計算裁切尺寸
 function computeDisplayCropGeometry(rawW, rawH) {
-  const isLandscapeFeed = rawW > rawH;
-  const logicalW = isLandscapeFeed ? rawH : rawW;
-  const logicalH = isLandscapeFeed ? rawW : rawH;
-
-  let cropW = logicalW;
-  let cropH = logicalH;
-  const currentRatio = logicalW / logicalH;
+  let cropW = rawW;
+  let cropH = rawH;
+  const currentRatio = rawW / rawH;
 
   if (currentRatio > DISPLAY_CROP_RATIO) {
-    cropW = logicalH * DISPLAY_CROP_RATIO;
+    cropW = rawH * DISPLAY_CROP_RATIO;
   } else {
-    cropH = logicalW / DISPLAY_CROP_RATIO;
+    cropH = rawW / DISPLAY_CROP_RATIO;
   }
 
-  return { isLandscapeFeed, cropW, cropH };
+  return { cropW, cropH };
 }
 
 function expandBoxByPercent(xMin, xMax, yMin, yMax, paddingPercent) {
@@ -512,6 +509,11 @@ export default function CameraModule() {
   const [reviewIndex, setReviewIndex] = useState(0);
   const [isSharing, setIsSharing] = useState(false);
   const [ocrResult, setOcrResult] = useState(null);
+  const [ocrChecking, setOcrChecking] = useState(false);
+
+  // 需求 2/3/4：人員 / 車牌 輸入欄位
+  const [personnelName, setPersonnelName] = useState("");
+  const [plateNumberInput, setPlateNumberInput] = useState("");
 
   const currentPosition = POSITION_SEQUENCE[positionIndex];
 
@@ -530,7 +532,23 @@ export default function CameraModule() {
     }
   }, []);
 
+  // 需求 3：人員欄位僅過濾符號（保留文字、數字、空白）
+  const handlePersonnelChange = useCallback((e) => {
+    const cleaned = e.target.value.replace(/[^\p{L}\p{N}\s]/gu, "");
+    setPersonnelName(cleaned);
+  }, []);
+
+  // 需求 4：車牌欄位僅保留英數字，自動轉大寫、去除「-」等符號
+  const handlePlateChange = useCallback((e) => {
+    // 允許輸入符號(如 "-"),僅自動轉大寫;比對時才去除符號
+    setPlateNumberInput(e.target.value.toUpperCase());
+  }, []);
+
+  const canStart = personnelName.trim().length > 0 && plateNumberInput.length > 0;
+
   const requestCamera = useCallback(async () => {
+    if (!canStart) return;
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus(CAMERA_STATUS.UNSUPPORTED);
       return;
@@ -586,7 +604,7 @@ export default function CameraModule() {
       }
       console.error("相機授權失敗：", err);
     }
-  }, []);
+  }, [canStart]);
 
   useEffect(() => {
     if (
@@ -750,7 +768,7 @@ export default function CameraModule() {
     const rawH = video.videoHeight;
     if (!rawW || !rawH) return;
 
-    const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
+    const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
     const scale = 640 / Math.max(cropW, cropH);
     const newW = Math.round(cropW * scale);
@@ -768,9 +786,6 @@ export default function CameraModule() {
     ctx.clip();
 
     ctx.translate(320, 320);
-    if (isLandscapeFeed) {
-      ctx.rotate(Math.PI / 2);
-    }
     ctx.scale(scale, scale);
     ctx.drawImage(video, -rawW / 2, -rawH / 2, rawW, rawH);
 
@@ -936,7 +951,7 @@ export default function CameraModule() {
 
     const rawW = video.videoWidth;
     const rawH = video.videoHeight;
-    const { isLandscapeFeed, cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
+    const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
 
     const canvas = document.createElement("canvas");
     canvas.width = cropW;
@@ -944,9 +959,6 @@ export default function CameraModule() {
     const ctx = canvas.getContext("2d");
 
     ctx.translate(cropW / 2, cropH / 2);
-    if (isLandscapeFeed) {
-      ctx.rotate(Math.PI / 2);
-    }
     ctx.drawImage(video, -rawW / 2, -rawH / 2, rawW, rawH);
 
     const outputCanvas = downscaleCanvasIfNeeded(canvas, MAX_OUTPUT_LONG_EDGE);
@@ -956,17 +968,25 @@ export default function CameraModule() {
     setStage(FLOW_STAGE.PREVIEW);
 
     setOcrResult(null);
+    setOcrChecking(false);
     if (charModelReady && detectionsRef.current["license_plate"]) {
+      setOcrChecking(true);
       recognizePlateCharacters(outputCanvas, detectionsRef.current["license_plate"])
         .then((result) => {
           if (result) setOcrResult(result);
         })
-        .catch((err) => console.error("字元辨識發生錯誤：", err));
+        .catch((err) => console.error("字元辨識發生錯誤：", err))
+        .finally(() => setOcrChecking(false));
     }
   }, [currentPosition, charModelReady, recognizePlateCharacters]);
 
+  // 需求 5:與輸入車牌比對是否相符(比對前先去除輸入車牌中的符號)
+  const normalizedPlateNumber = plateNumberInput.replace(/[^A-Z0-9]/g, "");
+  const plateMismatch = !ocrChecking && ocrResult && ocrResult.text !== normalizedPlateNumber;
+
   const confirmPhoto = useCallback(() => {
     if (!previewPhoto) return;
+    if (plateMismatch) return; // 保險：不符時不允許確認
     const photo = previewPhoto;
     const confirmedIndex = positionIndex;
 
@@ -984,10 +1004,12 @@ export default function CameraModule() {
       setPositionIndex(confirmedIndex + 1);
       setStage(FLOW_STAGE.SHOOTING);
     }
-  }, [previewPhoto, positionIndex]);
+  }, [previewPhoto, positionIndex, plateMismatch]);
 
   const retakePhoto = useCallback(() => {
     setPreviewPhoto(null);
+    setOcrResult(null);
+    setOcrChecking(false);
     setStage(FLOW_STAGE.SHOOTING);
   }, []);
 
@@ -1041,6 +1063,7 @@ export default function CameraModule() {
     setCapturedPhotos([]);
     setPreviewPhoto(null);
     setOcrResult(null);
+    setOcrChecking(false);
     setReviewIndex(0);
     setIsSharing(false);
     stableSinceRef.current = null;
@@ -1055,12 +1078,16 @@ export default function CameraModule() {
     setCapturedPhotos([]);
     setPreviewPhoto(null);
     setOcrResult(null);
+    setOcrChecking(false);
     setReviewIndex(0);
     setIsSharing(false);
     stableSinceRef.current = null;
     setStableCountdownActive(false);
     setStage(FLOW_STAGE.SHOOTING);
     setStatus(CAMERA_STATUS.IDLE);
+    // 回到最開始，換車換人，重置輸入欄位
+    setPersonnelName("");
+    setPlateNumberInput("");
   }, [stopStream]);
 
   const canAutoCapture =
@@ -1118,7 +1145,34 @@ export default function CameraModule() {
 
       {status === CAMERA_STATUS.IDLE && (
         <div style={styles.centerScreen}>
-          <button style={styles.startButton} onClick={requestCamera}>開始檢測</button>
+          <div style={styles.inputGroup}>
+            <label style={styles.inputLabel}>人員</label>
+            <input
+              type="text"
+              value={personnelName}
+              onChange={handlePersonnelChange}
+              placeholder="請輸入人員姓名"
+              style={styles.textInput}
+            />
+          </div>
+          <div style={styles.inputGroup}>
+            <label style={styles.inputLabel}>車牌</label>
+            <input
+              type="text"
+              value={plateNumberInput}
+              onChange={handlePlateChange}
+              placeholder="請輸入車牌號碼"
+              style={styles.textInput}
+            />
+          </div>
+          <button
+            style={canStart ? styles.startButton : { ...styles.startButton, ...styles.startButtonDisabled }}
+            onClick={requestCamera}
+            disabled={!canStart}
+          >
+            開始檢測
+          </button>
+          {!canStart && <p style={styles.hintText}>請先填寫人員與車牌後再開始檢測</p>}
         </div>
       )}
 
@@ -1180,6 +1234,7 @@ export default function CameraModule() {
             {isFlipped && (
               <div style={styles.orientationWarning}>
                 <p>請重新確認方位</p>
+                <p style={styles.orientationWarningSub}>目前應拍攝：{template?.label}</p>
               </div>
             )}
 
@@ -1187,6 +1242,7 @@ export default function CameraModule() {
               <div style={styles.orientationWarning}>
                 {orientationIssues.betaBad && <p>請直立鏡頭</p>}
                 {orientationIssues.gammaBad && <p>請保持畫面水平</p>}
+                <p style={styles.orientationWarningSub}>目前應拍攝：{template?.label}</p>
               </div>
             )}
 
@@ -1251,16 +1307,32 @@ export default function CameraModule() {
 
       {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.PREVIEW && previewPhoto && (
         <div style={styles.previewContainer}>
-          <img src={previewPhoto.dataUrl} alt="拍攝預覽" style={styles.previewImage} />
+          <div style={styles.previewImageFrame}>
+            <img src={previewPhoto.dataUrl} alt="拍攝預覽" style={styles.previewImage} />
+          </div>
           <div style={styles.previewLabel}>{GUIDE_TEMPLATES[previewPhoto.position]?.label}</div>
-          {ocrResult && (
+
+          {ocrChecking && <div style={styles.previewLabel}>車牌辨識中...</div>}
+
+          {!ocrChecking && ocrResult && (
             <div style={styles.previewLabel}>
               車牌辨識：{ocrResult.text}（信心 {ocrResult.confidence.toFixed(2)}）
             </div>
           )}
+
+          {!ocrChecking && plateMismatch && (
+            <div style={styles.mismatchWarning}>
+              辨識車牌「{ocrResult.text}」與輸入車牌「{normalizedPlateNumber}」不符，請確認拍攝車輛是否正確後重新拍攝
+            </div>
+          )}
+
           <div style={styles.previewButtonRow}>
             <button style={styles.retakeButton} onClick={retakePhoto}>重新拍攝</button>
-            <button style={styles.confirmButton} onClick={confirmPhoto}>確認保留</button>
+            {!plateMismatch && (
+              <button style={styles.confirmButton} onClick={confirmPhoto} disabled={ocrChecking}>
+                {ocrChecking ? "辨識中..." : "確認保留"}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -1356,6 +1428,28 @@ const styles = {
     alignItems: "center",
     gap: "16px",
   },
+  inputGroup: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    width: "100%",
+    maxWidth: "280px",
+    gap: "6px",
+  },
+  inputLabel: {
+    fontSize: "14px",
+    color: "#ccc",
+  },
+  textInput: {
+    width: "100%",
+    padding: "10px 12px",
+    fontSize: "16px",
+    borderRadius: "6px",
+    border: "1px solid #444",
+    backgroundColor: "#111",
+    color: "#fff",
+    boxSizing: "border-box",
+  },
   startButton: {
     padding: "16px 32px",
     fontSize: "18px",
@@ -1365,6 +1459,11 @@ const styles = {
     color: "#000",
     fontWeight: "bold",
     cursor: "pointer",
+  },
+  startButtonDisabled: {
+    backgroundColor: "#555",
+    color: "#999",
+    cursor: "not-allowed",
   },
   retryButton: {
     marginTop: "16px",
@@ -1451,16 +1550,16 @@ const styles = {
   },
   positionBadge: {
     position: "absolute",
-    top: 8,
+    top: 12,
     left: "50%",
     transform: "translateX(-50%)",
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: "rgba(0,0,0,0.7)",
     color: "#fff",
-    padding: "4px 12px",
-    borderRadius: "4px",
-    fontSize: "13px",
+    padding: "10px 20px",
+    borderRadius: "8px",
+    fontSize: "22px",
     fontWeight: "bold",
-    zIndex: 10,
+    zIndex: 50,
     whiteSpace: "nowrap",
   },
   orientationWarning: {
@@ -1469,7 +1568,7 @@ const styles = {
     left: 0,
     width: "100%",
     height: "100%",
-    backgroundColor: "rgba(0, 0, 0, 0.85)",
+    backgroundColor: "rgba(0, 0, 0, 0.75)",
     color: "#fff",
     display: "flex",
     flexDirection: "column",
@@ -1481,6 +1580,11 @@ const styles = {
     fontWeight: "bold",
     gap: "8px",
     zIndex: 40,
+  },
+  orientationWarningSub: {
+    fontSize: "16px",
+    fontWeight: "normal",
+    color: "#0f8",
   },
   hintBanner: {
     position: "absolute",
@@ -1570,15 +1674,33 @@ const styles = {
     gap: "16px",
     padding: "24px",
   },
-  previewImage: {
-    maxWidth: "100%",
-    maxHeight: "70vh",
+  // 預覽階段僅顯示中央 3:4 範圍(避免露出裁切範圍外的異常區域)，
+  // 實際存檔與上傳仍使用完整 9:16 影像，這裡只是顯示層裁切
+  previewImageFrame: {
+    width: "100%",
+    maxWidth: "300px",
+    aspectRatio: "3 / 4",
+    overflow: "hidden",
     borderRadius: "8px",
+    backgroundColor: "#111",
+  },
+  previewImage: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
   },
   previewLabel: {
     color: "#fff",
     fontSize: "16px",
     fontWeight: "bold",
+  },
+  mismatchWarning: {
+    color: "#ff6666",
+    fontSize: "14px",
+    fontWeight: "bold",
+    lineHeight: 1.6,
+    maxWidth: "300px",
+    textAlign: "center",
   },
   previewButtonRow: {
     display: "flex",
