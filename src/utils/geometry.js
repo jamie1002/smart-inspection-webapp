@@ -1,0 +1,84 @@
+// 影像裁切幾何相關純函式（單一真實來源）
+// CameraFlow、services/models、CameraCalibrationView 皆共用此檔，
+// 消除 0719 文件記載的「CameraDebugView 需手動同步」風險。
+//
+// 🔧 已移除旋轉修正邏輯：直接以感測器回報的原始寬高計算裁切尺寸。
+//   切勿重新加入 ctx.rotate / isLandscapeFeed，會破壞模型座標與引導框一致性。
+
+import { DISPLAY_CROP_RATIO } from "../constants/detection";
+
+export function computeDisplayCropGeometry(rawW, rawH) {
+  let cropW = rawW;
+  let cropH = rawH;
+  const currentRatio = rawW / rawH;
+
+  if (currentRatio > DISPLAY_CROP_RATIO) {
+    cropW = rawH * DISPLAY_CROP_RATIO;
+  } else {
+    cropH = rawW / DISPLAY_CROP_RATIO;
+  }
+
+  return { cropW, cropH };
+}
+
+export function downscaleCanvasIfNeeded(sourceCanvas, maxLongEdge) {
+  const { width, height } = sourceCanvas;
+  const longEdge = Math.max(width, height);
+  if (longEdge <= maxLongEdge) return sourceCanvas;
+
+  const scale = maxLongEdge / longEdge;
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = Math.round(width * scale);
+  outCanvas.height = Math.round(height * scale);
+  const ctx = outCanvas.getContext("2d");
+  ctx.drawImage(sourceCanvas, 0, 0, outCanvas.width, outCanvas.height);
+  return outCanvas;
+}
+
+export function expandBoxByPercent(xMin, xMax, yMin, yMax, paddingPercent) {
+  const w = xMax - xMin;
+  const h = yMax - yMin;
+  const padX = (w * paddingPercent) / 100;
+  const padY = (h * paddingPercent) / 100;
+  return {
+    xMin: xMin - padX,
+    xMax: xMax + padX,
+    yMin: yMin - padY,
+    yMax: yMax + padY,
+  };
+}
+
+export function cropRegionByPercent(sourceCanvas, xMinPct, xMaxPct, yMinPct, yMaxPct) {
+  const { width, height } = sourceCanvas;
+  const clamp = (v) => Math.min(100, Math.max(0, v));
+  const x = (clamp(xMinPct) / 100) * width;
+  const y = (clamp(yMinPct) / 100) * height;
+  const w = ((clamp(xMaxPct) - clamp(xMinPct)) / 100) * width;
+  const h = ((clamp(yMaxPct) - clamp(yMinPct)) / 100) * height;
+
+  const cropCanvas = document.createElement("canvas");
+  cropCanvas.width = Math.max(1, Math.round(w));
+  cropCanvas.height = Math.max(1, Math.round(h));
+  const ctx = cropCanvas.getContext("2d");
+  ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, cropCanvas.width, cropCanvas.height);
+  return cropCanvas;
+}
+
+export function letterboxToSquare(sourceCanvas, size) {
+  const { width, height } = sourceCanvas;
+  const scale = size / Math.max(width, height);
+  const newW = Math.round(width * scale);
+  const newH = Math.round(height * scale);
+  const padLeft = Math.floor((size - newW) / 2);
+  const padTop = Math.floor((size - newH) / 2);
+
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = size;
+  outCanvas.height = size;
+  const ctx = outCanvas.getContext("2d");
+  ctx.fillStyle = "black";
+  ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(sourceCanvas, 0, 0, width, height, padLeft, padTop, newW, newH);
+
+  return { canvas: outCanvas, scale, padLeft, padTop };
+}

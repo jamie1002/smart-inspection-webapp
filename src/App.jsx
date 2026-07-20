@@ -1,19 +1,21 @@
-import { useState } from 'react';
-import CameraModule from './components/CameraModule';
-import CameraDebugView from './components/CameraDebugView';
+import { useState } from "react";
+import CameraFlow from "./components/CameraFlow";
+import CameraCalibrationView from "./components/CameraCalibrationView";
+import { IS_TEST_MODE } from "./config/appConfig";
 
 function App() {
-  // 網址加上 ?debug 就會顯示除錯畫面，例如：
-  // https://jamie1002.github.io/smart-inspection-webapp/?debug
-  const [isDebugMode] = useState(() => {
-    return new URLSearchParams(window.location.search).has('debug');
+  // 校正工具僅測試版可達：網址加 ?debug（且需為測試版建置）
+  // 例如：https://<host>/smart-inspection-webapp/?debug
+  const [showCalibration] = useState(() => {
+    if (!IS_TEST_MODE) return false;
+    try {
+      return new URLSearchParams(window.location.search).has("debug");
+    } catch {
+      return false;
+    }
   });
 
-  return (
-    <div>
-      {isDebugMode ? <CameraDebugView /> : <CameraModule />}
-    </div>
-  );
+  return showCalibration ? <CameraCalibrationView /> : <CameraFlow />;
 }
 
 export default App;

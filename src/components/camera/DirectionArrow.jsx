@@ -1,0 +1,20 @@
+// 方向箭頭 SVG（near/far 為前後雙箭頭，up/down/left/right 為單箭頭）
+
+export default function DirectionArrow({ direction, color = "#fff", size = 24 }) {
+  if (direction === "near" || direction === "far") {
+    const rotation = direction === "near" ? 0 : 180;
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" style={{ transform: `rotate(${rotation}deg)` }}>
+        <path d="M12 3 L16 9 L12 7 L8 9 Z" fill={color} />
+        <path d="M12 21 L16 15 L12 17 L8 15 Z" fill={color} />
+      </svg>
+    );
+  }
+  const rotationMap = { up: 0, right: 90, down: 180, left: 270 };
+  const rotation = rotationMap[direction] ?? 0;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={{ transform: `rotate(${rotation}deg)` }}>
+      <path d="M12 2 L20 18 L12 14 L4 18 Z" fill={color} />
+    </svg>
+  );
+}
