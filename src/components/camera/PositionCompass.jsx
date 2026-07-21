@@ -15,17 +15,22 @@ const CAR_IMG = {
   right_front: rightFront,
 };
 
-export default function PositionCompass({ currentIndex, completedCount }) {
+export default function PositionCompass({ currentPosition, capturedByPosition, onSelectPosition }) {
   return (
     <div style={styles.wrap}>
-      {POSITION_SEQUENCE.map((position, idx) => {
-        const done = idx < completedCount;
-        const current = idx === currentIndex;
+      {POSITION_SEQUENCE.map((position) => {
+        const done = !!capturedByPosition?.[position];
+        const current = position === currentPosition;
         const state = done ? "done" : current ? "current" : "pending";
         const borderColor =
           state === "current" ? colors.brand : state === "done" ? colors.success : colors.border;
         return (
-          <div key={position} style={styles.item}>
+          <button
+            key={position}
+            type="button"
+            onClick={() => onSelectPosition?.(position)}
+            style={styles.item}
+          >
             <div
               style={{
                 ...styles.iconBox,
@@ -55,7 +60,7 @@ export default function PositionCompass({ currentIndex, completedCount }) {
             >
               {GUIDE_TEMPLATES[position].label}
             </span>
-          </div>
+          </button>
         );
       })}
     </div>
@@ -76,6 +81,12 @@ const styles = {
     alignItems: "center",
     gap: 4,
     flex: "0 0 auto",
+    background: "none",
+    border: "none",
+    padding: 0,
+    margin: 0,
+    cursor: "pointer",
+    pointerEvents: "auto",
   },
   iconBox: {
     position: "relative",

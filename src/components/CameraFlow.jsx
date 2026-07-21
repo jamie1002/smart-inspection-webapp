@@ -2,9 +2,11 @@
 // 只組合 hooks、持有 stage、決定渲染哪支畫面元件；不含演算法。
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 
+import { IS_TEST_MODE } from "../config/appConfig";
 import { CAMERA_STATUS, FLOW_STAGE } from "../constants/flow";
 import {
   POSITION_SEQUENCE,
+  POSITION_INDEX,
   GUIDE_TEMPLATES,
 } from "../constants/guideTemplates";
 import { CAR_MODELS, DEFAULT_CAR_MODEL } from "../constants/carModels";
@@ -52,8 +54,8 @@ export default function CameraFlow() {
   const { liveBlurOk, blurBaselineRef, lastBlurScoreRef } = useLiveBlur(status, videoRef);
 
   const [stage, setStage] = useState(FLOW_STAGE.SHOOTING);
-  const [positionIndex, setPositionIndex] = useState(0);
-  const [capturedPhotos, setCapturedPhotos] = useState([]);
+  const [currentPosition, setCurrentPosition] = useState(POSITION_SEQUENCE[0]);
+  const [capturedByPosition, setCapturedByPosition] = useState({});
   const [previewPhoto, setPreviewPhoto] = useState(null);
   const [ocrResult, setOcrResult] = useState(null);
   const [ocrChecking, setOcrChecking] = useState(false);
@@ -66,8 +68,12 @@ export default function CameraFlow() {
   const [cropRatio, setCropRatio] = useState(DEFAULT_ASPECT_RATIO);
 
   const activeModel = CAR_MODELS[carModel];
-  const currentPosition = POSITION_SEQUENCE[positionIndex];
   const template = activeModel?.variants?.[cropRatio]?.templates?.[currentPosition] || GUIDE_TEMPLATES[currentPosition];
+  // 需要陣列的地方（Review/Complete/分享）依 POSITION_SEQUENCE 順序自 map 取出，確保順序穩定
+  const capturedPhotos = useMemo(
+    () => POSITION_SEQUENCE.map((p) => capturedByPosition[p]).filter(Boolean),
+    [capturedByPosition]
+  );
 
   useEffect(() => { stageRef.current = stage; }, [stage]);
 
@@ -187,12 +193,12 @@ export default function CameraFlow() {
     setOcrChecking(false);
     if (charModelReady && detSnapshot["license_plate"]) {
       setOcrChecking(true);
-      recognizePlateCharacters(charModelRef.current, outputCanvas, detSnapshot["license_plate"])
+      recognizePlateCharacters(charModelRef.current, outputCanvas, detSnapshot["license_plate"], template?.licensePlate)
         .then((result) => { if (result) setOcrResult(result); })
         .catch((err) => console.error("字元辨識發生錯誤：", err))
         .finally(() => setOcrChecking(false));
     }
-  }, [currentPosition, charModelReady, videoRef, gpsRef, detectionsRef, latestOrientationRef, lastBlurScoreRef, blurBaselineRef, charModelRef]);
+  }, [currentPosition, charModelReady, template, videoRef, gpsRef, detectionsRef, latestOrientationRef, lastBlurScoreRef, blurBaselineRef, charModelRef, cropRatio]);
 
   const canAutoCapture =
     orientationOk && liveBlurOk && !needsDetection && !isFlipped &&
@@ -206,13 +212,27 @@ export default function CameraFlow() {
   });
 
   const confirmPhoto = useCallback(() => {
-    if (!previewPhoto || plateMismatch) return;
-    const photo = previewPhoto;
-    const confirmedIndex = positionIndex;
+    if (!previewPhoto) return;
+    if (plateMismatch && !IS_TEST_MODE) return;
+
+    // 檢視「已完成角度」時按確認＝單純保留離開，不重複上傳
+    if (previewPhoto.existing) {
+      setPreviewPhoto(null);
+      setOcrResult(null);
+      setOcrChecking(false);
+      const next = POSITION_SEQUENCE.find((p) => !capturedByPosition[p]);
+      if (next) setCurrentPosition(next);
+      setStage(FLOW_STAGE.SHOOTING);
+      return;
+    }
+
+    const photo = { ...previewPhoto, ocrResult };
+    const confirmedPosition = currentPosition;
     const meta = pendingMetaRef.current || {};
     const plateMatch = ocrResult ? ocrResult.text === normalizedPlateNumber : null;
 
-    setCapturedPhotos((prev) => [...prev, photo]);
+    const updated = { ...capturedByPosition, [confirmedPosition]: photo };
+    setCapturedByPosition(updated);
 
     if (rentalIdRef.current) {
       uploadPhotoRecord({
@@ -223,7 +243,7 @@ export default function CameraFlow() {
         personnelName,
         plateInput: plateNumberInput,
         plateInputNormalized: normalizedPlateNumber,
-        sequenceIndex: confirmedIndex,
+        sequenceIndex: POSITION_INDEX[confirmedPosition],
         dataUrl: photo.dataUrl,
         plateOcr: ocrResult,
         plateMatch,
@@ -235,14 +255,16 @@ export default function CameraFlow() {
     setOcrResult(null);
     setOcrChecking(false);
 
-    if (confirmedIndex >= POSITION_SEQUENCE.length - 1) {
+    const allDone = POSITION_SEQUENCE.every((p) => updated[p]);
+    if (allDone) {
       if (rentalIdRef.current) markPickupUploaded(rentalIdRef.current).catch(() => {});
       setStage(FLOW_STAGE.ANALYZING);
     } else {
-      setPositionIndex(confirmedIndex + 1);
+      const next = POSITION_SEQUENCE.find((p) => !updated[p]);
+      setCurrentPosition(next);
       setStage(FLOW_STAGE.SHOOTING);
     }
-  }, [previewPhoto, plateMismatch, positionIndex, ocrResult, normalizedPlateNumber, personnelName, plateNumberInput, carModel, sessionIdRef]);
+  }, [previewPhoto, plateMismatch, currentPosition, capturedByPosition, ocrResult, normalizedPlateNumber, personnelName, plateNumberInput, carModel, sessionIdRef]);
 
   const retakePhoto = useCallback(() => {
     retakeCountRef.current[currentPosition] = (retakeCountRef.current[currentPosition] || 0) + 1;
@@ -251,6 +273,22 @@ export default function CameraFlow() {
     setOcrChecking(false);
     setStage(FLOW_STAGE.SHOOTING);
   }, [currentPosition]);
+
+  // 點擊 compass 上任一角度：未拍 → 直接切去該角度拍攝；已拍 → 開啟該角度預覽（可確認保留或重拍）
+  const selectPosition = useCallback((position) => {
+    const stored = capturedByPosition[position];
+    if (stored) {
+      setPreviewPhoto({ ...stored, existing: true });
+      setCurrentPosition(position);
+      setOcrResult(stored.ocrResult || null);
+      setOcrChecking(false);
+      setStage(FLOW_STAGE.PREVIEW);
+    } else {
+      setCurrentPosition(position);
+      setPreviewPhoto(null);
+      setStage(FLOW_STAGE.SHOOTING);
+    }
+  }, [capturedByPosition]);
 
   // ANALYZING → REVIEW_INTRO
   useEffect(() => {
@@ -285,8 +323,8 @@ export default function CameraFlow() {
   }, [capturedPhotos, isSharing]);
 
   const resetSharedState = useCallback(() => {
-    setPositionIndex(0);
-    setCapturedPhotos([]);
+    setCurrentPosition(POSITION_SEQUENCE[0]);
+    setCapturedByPosition({});
     setPreviewPhoto(null);
     setOcrResult(null);
     setOcrChecking(false);
@@ -345,15 +383,21 @@ export default function CameraFlow() {
         />
       )}
 
-      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.SHOOTING && (
+      {/* 【相機穩定性修正】SHOOTING/PREVIEW 都保留 video 掛載，避免每次拍照都
+          unmount+remount <video>、對同一條 MediaStream track 反覆重新 attach。
+          這種反覆 attach 在部分 WebKit 版本會在數次後讓畫面卡在最後一幀不再更新
+          （track 本身仍是 live，只是不再繪製），且無法自行恢復；PREVIEW 用不透明
+          的 PreviewScreen 蓋在上面即可，不需要真的把 video 拆掉。 */}
+      {status === CAMERA_STATUS.GRANTED && (stage === FLOW_STAGE.SHOOTING || stage === FLOW_STAGE.PREVIEW) && (
         <Viewfinder
           videoRef={videoRef}
           template={template}
           carModel={carModel}
           cropRatio={cropRatio}
           position={currentPosition}
-          positionIndex={positionIndex}
-          completedCount={capturedPhotos.length}
+          currentPosition={currentPosition}
+          capturedByPosition={capturedByPosition}
+          onSelectPosition={selectPosition}
           modelReady={modelReady}
           modelError={modelError}
           detections={detections}
@@ -424,6 +468,7 @@ export default function CameraFlow() {
 
 const styles = {
   page: {
+    position: "relative",
     width: "100vw",
     height: "100dvh",
     display: "flex",

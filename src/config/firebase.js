@@ -25,13 +25,24 @@ export const auth = getAuth(app);
 export const STORAGE_BUCKET = firebaseConfig.storageBucket;
 
 // 背景匿名登入（使用者無感）
+// authError：登入失敗時記錄旗標，避免 upload.js 的 `await authReady` 永遠卡住卻不報錯
+// （交接單 §3：匿名登入若被 Firebase Console 停用，signInAnonymously 會 reject，
+//  但沒有這個旗標的話呼叫端完全看不出「卡住」與「失敗」的差異）。
 let authReadyResolve;
 export const authReady = new Promise((resolve) => {
   authReadyResolve = resolve;
 });
 
+export let authError = null;
+
 onAuthStateChanged(auth, (user) => {
-  if (user) authReadyResolve(user);
+  if (user) {
+    authError = null;
+    authReadyResolve(user);
+  }
 });
 
-signInAnonymously(auth).catch((err) => console.error("匿名登入失敗", err));
+signInAnonymously(auth).catch((err) => {
+  authError = err;
+  console.error("匿名登入失敗（請確認 Firebase Console → Authentication → Anonymous 是否已啟用）", err);
+});

@@ -22,6 +22,14 @@ export const POSITION_TO_PHOTO_TYPE = {
   right_front: "front_right",
 };
 
+// 內部 position → 固定序號（自由順序拍攝時，序號與拍攝順序無關，永遠對應同一角度）
+export const POSITION_INDEX = {
+  front_left: 0,
+  left_rear: 1,
+  right_rear: 2,
+  right_front: 3,
+};
+
 export const GUIDE_TEMPLATES = {
   front_left: {
     label: "左前",

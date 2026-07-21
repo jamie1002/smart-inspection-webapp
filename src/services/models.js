@@ -14,6 +14,7 @@ import {
     CHAR_CONFIDENCE_THRESHOLD,
     CHAR_NMS_IOU_THRESHOLD,
     CHAR_CROP_PADDING_PERCENT,
+    CHAR_CROP_MIN_PADDING_PCT,
     CHAR_INPUT_SIZE,
     DETECTION_INPUT_SIZE,
 } from "../constants/detection";
@@ -109,7 +110,13 @@ export function runCarDetection(video, model, canvas, cropRatio) {
 }
 
 // 車牌字元辨識：回傳 { text, confidence } 或 null
-export async function recognizePlateCharacters(charModel, sourceCanvas, plateDetection) {
+// templateBox（可選）：目前角度／比例的車牌校正位置（百分比座標，見 guideTemplates/carModels）。
+// 車體定位模型固定在 640×640 正方形內推論，9:16 因裁切高度較大、縮放係數較小，
+// 車牌在偵測輸入中的實際像素明顯少於 3:4，框的量化誤差相對更大，容易偏窄切掉右側字元。
+// 若有 templateBox，取「偵測框（已外擴）」與「樣板校正位置」的聯集當作裁切範圍：
+// 樣板座標是人工校正的固定值，不受偵測解析度影響，可當作可靠的下限，避免只靠
+// 「框自身寬高的百分比」外擴在框本身就偏窄時補不回被切掉的字元。
+export async function recognizePlateCharacters(charModel, sourceCanvas, plateDetection, templateBox) {
     if (!charModel || !plateDetection) return null;
 
     const expanded = expandBoxByPercent(
@@ -117,14 +124,23 @@ export async function recognizePlateCharacters(charModel, sourceCanvas, plateDet
         plateDetection.xMaxPct,
         plateDetection.yMinPct,
         plateDetection.yMaxPct,
-        CHAR_CROP_PADDING_PERCENT
+        CHAR_CROP_PADDING_PERCENT,
+        CHAR_CROP_MIN_PADDING_PCT
     );
+    const cropBox = templateBox
+        ? {
+            xMin: Math.min(expanded.xMin, templateBox.xMin),
+            xMax: Math.max(expanded.xMax, templateBox.xMax),
+            yMin: Math.min(expanded.yMin, templateBox.yMin),
+            yMax: Math.max(expanded.yMax, templateBox.yMax),
+        }
+        : expanded;
     const plateCanvas = cropRegionByPercent(
         sourceCanvas,
-        expanded.xMin,
-        expanded.xMax,
-        expanded.yMin,
-        expanded.yMax
+        cropBox.xMin,
+        cropBox.xMax,
+        cropBox.yMin,
+        cropBox.yMax
     );
 
     const { canvas: inputCanvas, scale, padLeft } = letterboxToSquare(plateCanvas, CHAR_INPUT_SIZE);

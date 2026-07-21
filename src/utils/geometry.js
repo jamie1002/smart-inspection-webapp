@@ -37,11 +37,13 @@ export function downscaleCanvasIfNeeded(sourceCanvas, maxLongEdge) {
     return outCanvas;
 }
 
-export function expandBoxByPercent(xMin, xMax, yMin, yMax, paddingPercent) {
+// paddingPercent：相對框自身寬高的外擴比例。
+// minPaddingPct：最小外擴（畫面百分點，與框準確度無關），框偏窄時仍保底補足。
+export function expandBoxByPercent(xMin, xMax, yMin, yMax, paddingPercent, minPaddingPct = 0) {
     const w = xMax - xMin;
     const h = yMax - yMin;
-    const padX = (w * paddingPercent) / 100;
-    const padY = (h * paddingPercent) / 100;
+    const padX = Math.max((w * paddingPercent) / 100, minPaddingPct);
+    const padY = Math.max((h * paddingPercent) / 100, minPaddingPct);
     return {
         xMin: xMin - padX,
         xMax: xMax + padX,

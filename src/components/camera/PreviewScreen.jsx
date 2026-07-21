@@ -1,7 +1,7 @@
 // 拍照預覽（PREVIEW）：3:4 顯示層裁切 + 車牌辨識比對
 // 實際存檔/上傳仍為完整 9:16，這裡只是顯示裁切。
 import { IS_TEST_MODE } from "../../config/appConfig";
-import { colors, space, radius, font, primaryButton, secondaryButton, disabledButton } from "../../styles/theme";
+import { colors, space, radius, font, z, primaryButton, secondaryButton, disabledButton } from "../../styles/theme";
 
 export default function PreviewScreen({
   previewPhoto,
@@ -31,6 +31,10 @@ export default function PreviewScreen({
         <div style={{ ...styles.sub, color: colors.success }}>車牌相符 ✓</div>
       )}
 
+      {!ocrChecking && !ocrResult && !IS_TEST_MODE && (
+        <div style={styles.mismatch}>未辨識到車牌，請重新拍攝</div>
+      )}
+
       {!ocrChecking && plateMismatch && (
         <div style={styles.mismatch}>
           辨識車牌「{ocrResult.text}」與輸入車牌「{normalizedPlateNumber}」不符，
@@ -40,7 +44,7 @@ export default function PreviewScreen({
 
       <div style={styles.buttonRow}>
         <button style={secondaryButton} onClick={onRetake}>重新拍攝</button>
-        {!plateMismatch && (
+        {(!plateMismatch || IS_TEST_MODE) && (
           <button
             style={{ ...primaryButton, ...(ocrChecking ? disabledButton : {}) }}
             onClick={onConfirm}
@@ -56,8 +60,11 @@ export default function PreviewScreen({
 
 const styles = {
   container: {
-    width: "100%",
-    height: "100%",
+    // 覆蓋在持續掛載的 Viewfinder(video) 之上（見 CameraFlow 註解：
+    // PREVIEW 階段不再 unmount video，改由這層不透明畫面蓋住）
+    position: "absolute",
+    inset: 0,
+    zIndex: z.preview,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",

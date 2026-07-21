@@ -62,6 +62,7 @@ export const z = {
   shutter: 30,
   warning: 40,
   compass: 50,
+  preview: 100, // PreviewScreen 蓋在持續掛載的 Viewfinder(video) 之上
 };
 
 // 共用按鈕樣式產生器

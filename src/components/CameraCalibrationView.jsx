@@ -4,6 +4,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { CAMERA_STATUS } from "../constants/flow";
 import { computeDisplayCropGeometry } from "../utils/geometry";
+import { ASPECT_RATIOS, ASPECT_RATIO_LIST, DEFAULT_ASPECT_RATIO } from "../constants/aspectRatios";
 import { colors } from "../styles/theme";
 
 const DRAW_INTERVAL_MS = 150;
@@ -17,6 +18,7 @@ export default function CameraCalibrationView() {
 
   const [status, setStatus] = useState(CAMERA_STATUS.IDLE);
   const [rawSize, setRawSize] = useState({ w: 0, h: 0 });
+  const [cropRatioKey, setCropRatioKey] = useState(DEFAULT_ASPECT_RATIO);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -67,7 +69,7 @@ export default function CameraCalibrationView() {
 
       const modelCanvas = modelInputCanvasRef.current;
       if (modelCanvas) {
-        const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
+        const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH, ASPECT_RATIOS[cropRatioKey].ratio);
         const scale = 640 / Math.max(cropW, cropH);
         const newW = Math.round(cropW * scale);
         const newH = Math.round(cropH * scale);
@@ -103,7 +105,7 @@ export default function CameraCalibrationView() {
 
     intervalRef.current = setInterval(drawDebugFrames, DRAW_INTERVAL_MS);
     return () => clearInterval(intervalRef.current);
-  }, [status]);
+  }, [status, cropRatioKey]);
 
   return (
     <div style={styles.page}>
@@ -119,15 +121,29 @@ export default function CameraCalibrationView() {
 
       {status === CAMERA_STATUS.GRANTED && (
         <div style={styles.layout}>
+          <div style={styles.ratioSwitch}>
+            {ASPECT_RATIO_LIST.map((key) => (
+              <button
+                key={key}
+                style={{
+                  ...styles.ratioBtn,
+                  ...(key === cropRatioKey ? styles.ratioBtnActive : {}),
+                }}
+                onClick={() => setCropRatioKey(key)}
+              >
+                {ASPECT_RATIOS[key].label}
+              </button>
+            ))}
+          </div>
           <div style={styles.viewfinderWrap}>
-            <p style={styles.label}>① 正式畫面邏輯（9:16，object-fit: cover 置中裁切）</p>
-            <div style={styles.viewfinder}>
+            <p style={styles.label}>① 正式畫面邏輯（{cropRatioKey}，object-fit: cover 置中裁切）</p>
+            <div style={{ ...styles.viewfinder, aspectRatio: `${ASPECT_RATIOS[cropRatioKey].w} / ${ASPECT_RATIOS[cropRatioKey].h}` }}>
               <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
             </div>
           </div>
           <div style={styles.squareRow}>
             <div style={styles.squareItem}>
-              <p style={styles.label}>② 模型輸入前處理（9:16 裁切→640，無旋轉修正）</p>
+              <p style={styles.label}>② 模型輸入前處理（{cropRatioKey} 裁切→640，無旋轉修正）</p>
               <canvas ref={modelInputCanvasRef} width={640} height={640} style={styles.squareCanvas} />
             </div>
             <div style={styles.squareItem}>
@@ -148,6 +164,22 @@ const styles = {
   startBtn: { padding: "16px 32px", fontSize: 18, borderRadius: 8, border: "none", backgroundColor: colors.brand, color: "#fff", fontWeight: 700, cursor: "pointer" },
   err: { color: colors.danger, fontSize: 16 },
   layout: { width: "100%", display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: 16, boxSizing: "border-box" },
+  ratioSwitch: { display: "flex", gap: 8 },
+  ratioBtn: {
+    padding: "6px 16px",
+    fontSize: 13,
+    fontWeight: 700,
+    borderRadius: 999,
+    border: `1px solid ${colors.border}`,
+    backgroundColor: "transparent",
+    color: colors.textSecondary,
+    cursor: "pointer",
+  },
+  ratioBtnActive: {
+    backgroundColor: colors.brand,
+    borderColor: colors.brand,
+    color: "#fff",
+  },
   viewfinderWrap: { display: "flex", flexDirection: "column", alignItems: "center" },
   label: { color: "#fff", fontSize: 13, marginBottom: 6, textAlign: "center" },
   viewfinder: { width: 260, aspectRatio: "9 / 16", backgroundColor: "#111", overflow: "hidden" },

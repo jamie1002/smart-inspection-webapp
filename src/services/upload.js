@@ -13,7 +13,7 @@ import {
   Timestamp,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { db, storage, STORAGE_BUCKET, authReady } from "../config/firebase";
+import { db, storage, STORAGE_BUCKET, authReady, authError } from "../config/firebase";
 import { IS_TEST_MODE, APP_MODE, APP_VERSION, MODEL_VERSION } from "../config/appConfig";
 import { POSITION_TO_PHOTO_TYPE } from "../constants/guideTemplates";
 
@@ -30,6 +30,14 @@ function dataUrlToBlob(dataUrl) {
   return new Blob([bytes], { type: mime });
 }
 
+// 匿名登入若已失敗，authReady 永遠不會 resolve；這裡先檢查旗標，
+// 讓呼叫端能收到明確錯誤（「上傳失敗：匿名登入未啟用」），而不是無聲卡住。
+function assertAuthReady() {
+  if (authError) {
+    throw new Error(`上傳失敗：匿名登入未啟用或被拒絕（${authError.code || authError.message}）`);
+  }
+}
+
 function deviceInfo() {
   return {
     userAgent: navigator.userAgent || "",
@@ -39,6 +47,7 @@ function deviceInfo() {
 
 // 建立訂單（開始檢測時呼叫一次）
 export async function createRental({ sessionId, vehicleId, carModel, personnelName, plateInput, plateInputNormalized }) {
+  assertAuthReady();
   await authReady;
   const rentalId = `Rental_${vehicleId}_${Date.now()}`;
   await setDoc(doc(db, RENTALS, rentalId), {
@@ -68,6 +77,7 @@ export async function createRental({ sessionId, vehicleId, carModel, personnelNa
 
 // 上傳單張照片：Storage → photos 文件 → rentals 計數 +1
 export async function uploadPhotoRecord(meta) {
+  assertAuthReady();
   await authReady;
 
   const {
@@ -157,6 +167,7 @@ export async function uploadPhotoRecord(meta) {
 
 // 四張完成後更新訂單狀態
 export async function markPickupUploaded(rentalId) {
+  assertAuthReady();
   await authReady;
   await updateDoc(doc(db, RENTALS, rentalId), {
     status: "pickup_uploaded",

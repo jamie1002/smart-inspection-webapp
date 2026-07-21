@@ -15,8 +15,9 @@ export default function Viewfinder({
   carModel,
   cropRatio,
   position,
-  positionIndex,
-  completedCount,
+  currentPosition,
+  capturedByPosition,
+  onSelectPosition,
   modelReady,
   modelError,
   detections,
@@ -57,7 +58,11 @@ export default function Viewfinder({
   return (
     <div style={styles.container}>
       <div style={styles.compassBar}>
-        <PositionCompass currentIndex={positionIndex} completedCount={completedCount} />
+        <PositionCompass
+          currentPosition={currentPosition}
+          capturedByPosition={capturedByPosition}
+          onSelectPosition={onSelectPosition}
+        />
       </div>
 
       <div style={{ ...styles.viewfinder, aspectRatio: cropRatio === "3:4" ? "3 / 4" : "9 / 16", maxWidth: cropRatio === "3:4" ? "calc(100vh * (3 / 4))" : "calc(100vh * (9 / 16))" }}>
@@ -148,7 +153,7 @@ const styles = {
     display: "flex",
     justifyContent: "center",
     zIndex: z.compass,
-    background: "linear-gradient(180deg, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0) 100%)",
+    backgroundColor: "rgba(0,0,0,0.6)",
     boxSizing: "border-box",
     pointerEvents: "none",
   },

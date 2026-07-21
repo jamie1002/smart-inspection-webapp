@@ -23,6 +23,12 @@ export const CHAR_CLASS_NAMES = [
 export const CHAR_CONFIDENCE_THRESHOLD = 0.6;
 export const CHAR_NMS_IOU_THRESHOLD = 0.3;
 export const CHAR_CROP_PADDING_PERCENT = 10;
+// 車牌裁切最小外擴（單位：畫面寬/高的百分點，非框自身比例）。
+// 原因：9:16 因裁切高度較大，車體定位模型前處理需把畫面等比縮進固定 640×640，
+// 縮放係數 = 640/max(cropW,cropH) 明顯小於 3:4，車牌在偵測輸入影像中的實際像素變小、
+// 偵測框容易偏窄（右側字元被切掉），若只用「框自身寬高的 10%」外擴，框越窄補的越少，
+// 無法補回被切掉的字元；改用「畫面百分比」的最小外擴，與框準確度無關，能穩定補足缺口。
+export const CHAR_CROP_MIN_PADDING_PCT = 3;
 export const CHAR_INPUT_SIZE = 640;
 
 // 模型輸入前處理正方形尺寸（車體定位）

@@ -17,9 +17,27 @@ export function useCamera() {
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current.getTracks().forEach((track) => {
+        track.onended = null; // 主動停止不應觸發下方的意外中斷處理
+        track.stop();
+      });
       streamRef.current = null;
     }
+  }, []);
+
+  // 相機串流被瀏覽器/系統意外中止時（非我方呼叫 stopStream 所致，例如過熱、
+  // 記憶體壓力、鏡頭被其他程式搶走），track 會觸發 'ended'。
+  // 若不處理，video 元素會停在最後一格畫面（一片黑或凍結），且永遠無法恢復，
+  // 使用者只能重新整理頁面。這裡偵測到中斷後清空串流參考、切回 ERROR 狀態，
+  // 讓既有的「重新嘗試」畫面可以重新呼叫 requestCamera()。
+  const attachEndedHandler = useCallback((stream) => {
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    track.onended = () => {
+      console.error("相機串流意外中斷（可能為過熱或系統資源限制），需重新授權才能恢復");
+      if (streamRef.current === stream) streamRef.current = null;
+      setStatus(CAMERA_STATUS.ERROR);
+    };
   }, []);
 
   const requestCamera = useCallback(async () => {
@@ -58,6 +76,7 @@ export function useCamera() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+      attachEndedHandler(stream);
       await tryConfigureCamera(stream);
       if (!sessionIdRef.current) sessionIdRef.current = generateSessionId();
       // GPS 暖機（請求定位權限，不擋流程）
