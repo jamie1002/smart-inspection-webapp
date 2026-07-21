@@ -3,6 +3,7 @@
 import { CAMERA_STATUS } from "../../constants/flow";
 import { CAR_MODEL_LIST } from "../../constants/carModels";
 import { colors, space, radius, font, primaryButton, disabledButton } from "../../styles/theme";
+import { IS_TEST_MODE } from "../../config/appConfig";
 
 export default function StartScreen({
   status,
@@ -14,6 +15,8 @@ export default function StartScreen({
   onPlateChange,
   canStart,
   onStart,
+  aspectRatio,
+  onAspectRatioChange,
 }) {
   if (status === CAMERA_STATUS.REQUESTING) {
     return <Center><p style={styles.msg}>正在請求相機權限…</p></Center>;
@@ -59,6 +62,15 @@ export default function StartScreen({
             ))}
           </select>
         </div>
+        {IS_TEST_MODE && (
+          <div style={styles.field}>
+            <label style={styles.label}>取景比例 (測試版)</label>
+            <select value={aspectRatio} onChange={onAspectRatioChange} style={styles.input}>
+              <option value="3:4">3:4</option>
+              <option value="9:16">9:16</option>
+            </select>
+          </div>
+        )}
         <div style={styles.field}>
           <label style={styles.label}>人員</label>
           <input

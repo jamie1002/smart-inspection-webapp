@@ -8,6 +8,7 @@ import {
   GUIDE_TEMPLATES,
 } from "../constants/guideTemplates";
 import { CAR_MODELS, DEFAULT_CAR_MODEL } from "../constants/carModels";
+import { ASPECT_RATIOS, DEFAULT_ASPECT_RATIO } from "../constants/aspectRatios";
 import {
   MAX_OUTPUT_LONG_EDGE,
   ANALYZING_DURATION_MS,
@@ -62,10 +63,11 @@ export default function CameraFlow() {
   const [personnelName, setPersonnelName] = useState("");
   const [plateNumberInput, setPlateNumberInput] = useState("");
   const [carModel, setCarModel] = useState(DEFAULT_CAR_MODEL);
+  const [cropRatio, setCropRatio] = useState(DEFAULT_ASPECT_RATIO);
 
   const activeModel = CAR_MODELS[carModel];
   const currentPosition = POSITION_SEQUENCE[positionIndex];
-  const template = GUIDE_TEMPLATES[currentPosition];
+  const template = activeModel?.variants?.[cropRatio]?.templates?.[currentPosition] || GUIDE_TEMPLATES[currentPosition];
 
   useEffect(() => { stageRef.current = stage; }, [stage]);
 
@@ -82,7 +84,8 @@ export default function CameraFlow() {
     modelReady,
     stage,
     currentPosition,
-    templates: activeModel.templates,
+    templates: activeModel?.variants?.[cropRatio]?.templates || GUIDE_TEMPLATES,
+    cropRatio: ASPECT_RATIOS[cropRatio]?.ratio || (9 / 16),
     videoRef,
     carModelRef,
     inputCanvasRef,
@@ -142,7 +145,7 @@ export default function CameraFlow() {
 
     const rawW = video.videoWidth;
     const rawH = video.videoHeight;
-    const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH);
+    const { cropW, cropH } = computeDisplayCropGeometry(rawW, rawH, ASPECT_RATIOS[cropRatio]?.ratio || (9 / 16));
 
     const canvas = document.createElement("canvas");
     canvas.width = cropW;
@@ -333,6 +336,8 @@ export default function CameraFlow() {
           onCarModelChange={(e) => setCarModel(e.target.value)}
           personnelName={personnelName}
           plateNumberInput={plateNumberInput}
+          aspectRatio={cropRatio}
+          onAspectRatioChange={(e) => setCropRatio(e.target.value)}
           onPersonnelChange={handlePersonnelChange}
           onPlateChange={handlePlateChange}
           canStart={canStart}
@@ -345,6 +350,7 @@ export default function CameraFlow() {
           videoRef={videoRef}
           template={template}
           carModel={carModel}
+          cropRatio={cropRatio}
           position={currentPosition}
           positionIndex={positionIndex}
           completedCount={capturedPhotos.length}

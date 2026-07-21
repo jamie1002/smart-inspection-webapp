@@ -5,23 +5,24 @@
 // 右側方位以水平鏡像自動生成。ghost 的車牌區域已擦成透明（避免露出他車車牌）。
 // viewBox 720x1280（=9:16），與相機取景框同比例，preserveAspectRatio=none 精準對位。
 import { CAR_MODELS } from "../../constants/carModels";
+import { ASPECT_RATIOS } from "../../constants/aspectRatios";
 import {
-  GUIDE_VIEWBOX,
   GUIDE_CAR_STYLE,
   GHOST_OPACITY,
 } from "../../constants/guideOutlines";
 import { colors } from "../../styles/theme";
 
-export default function GuideOverlay({ carModel, position, detections }) {
+export default function GuideOverlay({ carModel, cropRatio, position, detections }) {
   const model = CAR_MODELS[carModel];
-  const g = model?.outlines?.[position];
+  const g = model?.variants?.[cropRatio]?.outlines?.[position];
+  const viewBox = ASPECT_RATIOS[cropRatio]?.viewBox || ASPECT_RATIOS["9:16"].viewBox;
   if (!g) return null;
 
   const useGhost = GUIDE_CAR_STYLE === "ghost";
-  const ghostSrc = position.includes("front") ? model.ghost.front : model.ghost.rear;
+  const ghostSrc = position.includes("front") ? model.variants[cropRatio].ghost.front : model.variants[cropRatio].ghost.rear;
   const plateColor = detections?.license_plate?.aligned ? colors.success : "#ffffff";
   const wheelColor = detections?.wheel?.aligned ? colors.success : "#ffffff";
-  const svgMirror = g.mirror ? `translate(${GUIDE_VIEWBOX.w},0) scale(-1,1)` : undefined;
+  const svgMirror = g.mirror ? `translate(${viewBox.w},0) scale(-1,1)` : undefined;
 
   return (
     <div style={styles.wrap}>
@@ -38,7 +39,7 @@ export default function GuideOverlay({ carModel, position, detections }) {
       )}
       <svg
         style={styles.svg}
-        viewBox={`0 0 ${GUIDE_VIEWBOX.w} ${GUIDE_VIEWBOX.h}`}
+        viewBox={`0 0 ${viewBox.w} ${viewBox.h}`}
         preserveAspectRatio="none"
       >
         <g transform={svgMirror}>

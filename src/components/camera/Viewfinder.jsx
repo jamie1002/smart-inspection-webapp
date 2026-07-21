@@ -13,6 +13,7 @@ export default function Viewfinder({
   videoRef,
   template,
   carModel,
+  cropRatio,
   position,
   positionIndex,
   completedCount,
@@ -59,10 +60,10 @@ export default function Viewfinder({
         <PositionCompass currentIndex={positionIndex} completedCount={completedCount} />
       </div>
 
-      <div style={styles.viewfinder}>
+      <div style={{ ...styles.viewfinder, aspectRatio: cropRatio === "3:4" ? "3 / 4" : "9 / 16", maxWidth: cropRatio === "3:4" ? "calc(100vh * (3 / 4))" : "calc(100vh * (9 / 16))" }}>
         <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
 
-        <GuideOverlay carModel={carModel} position={position} detections={detections} />
+        <GuideOverlay carModel={carModel} cropRatio={cropRatio} position={position} detections={detections} />
         {IS_TEST_MODE && <DetectionOverlay detections={detections} />}
 
         {!modelReady && !modelError && <div style={styles.modelBadge}>模型載入中…</div>}
@@ -154,8 +155,6 @@ const styles = {
   viewfinder: {
     position: "relative",
     width: "100%",
-    maxWidth: "calc(100vh * (9 / 16))",
-    aspectRatio: "9 / 16",
     backgroundColor: "#111",
     overflow: "hidden",
     display: "flex",
