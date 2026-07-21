@@ -11,6 +11,7 @@ export function useInference({
   modelReady,
   stage,
   currentPosition,
+  templates,
   videoRef,
   carModelRef,
   inputCanvasRef,
@@ -54,16 +55,16 @@ export function useInference({
 
     const rawResults = runCarDetection(video, model, canvas);
 
-    setDetections(evaluateAlignment(rawResults, currentPosition));
+    setDetections(evaluateAlignment(rawResults, currentPosition, templates));
 
     const { distanceHint, horizontalHint, verticalHint, isFlipped, incomplete } =
-      evaluatePositionAndDistance(rawResults, currentPosition);
+      evaluatePositionAndDistance(rawResults, currentPosition, templates);
     setDistanceHint(distanceHint);
     setHorizontalHint(horizontalHint);
     setVerticalHint(verticalHint);
     setIsFlipped(isFlipped);
     setNeedsDetection(incomplete);
-  }, [currentPosition, videoRef, carModelRef, inputCanvasRef, orientationOkRef]);
+  }, [currentPosition, templates, videoRef, carModelRef, inputCanvasRef, orientationOkRef]);
 
   useEffect(() => {
     if (status !== CAMERA_STATUS.GRANTED || !modelReady || stage !== FLOW_STAGE.SHOOTING) return;

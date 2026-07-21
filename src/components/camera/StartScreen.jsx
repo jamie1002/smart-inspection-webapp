@@ -1,10 +1,13 @@
 // 開始檢測前畫面：人員 / 車牌 輸入（卡片式，iRent 風格）
 // 同時處理 requesting / denied / unsupported / error 狀態訊息。
 import { CAMERA_STATUS } from "../../constants/flow";
+import { CAR_MODEL_LIST } from "../../constants/carModels";
 import { colors, space, radius, font, primaryButton, disabledButton } from "../../styles/theme";
 
 export default function StartScreen({
   status,
+  carModel,
+  onCarModelChange,
   personnelName,
   plateNumberInput,
   onPersonnelChange,
@@ -48,6 +51,14 @@ export default function StartScreen({
       <p style={styles.subtitle}>四方位引導式自動拍照</p>
 
       <div style={styles.card}>
+        <div style={styles.field}>
+          <label style={styles.label}>車款</label>
+          <select value={carModel} onChange={onCarModelChange} style={styles.input}>
+            {CAR_MODEL_LIST.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </div>
         <div style={styles.field}>
           <label style={styles.label}>人員</label>
           <input

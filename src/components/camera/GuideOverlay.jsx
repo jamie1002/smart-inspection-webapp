@@ -1,43 +1,93 @@
-// 引導框（車牌/輪胎虛線框）— 正式版與測試版皆顯示，屬取景必要輔助
+// 取景引導疊圖（依車款）
+// 車身：GUIDE_CAR_STYLE='ghost' → 半透明實拍去背車（GHOST_OPACITY）＋白色外框線稿
+//        GUIDE_CAR_STYLE='line'  → 只有白色外框線稿
+// 車牌/車輪：線稿，對齊該類偵測時轉綠（detections[key].aligned）。
+// 右側方位以水平鏡像自動生成。ghost 的車牌區域已擦成透明（避免露出他車車牌）。
+// viewBox 720x1280（=9:16），與相機取景框同比例，preserveAspectRatio=none 精準對位。
+import { CAR_MODELS } from "../../constants/carModels";
+import {
+  GUIDE_VIEWBOX,
+  GUIDE_CAR_STYLE,
+  GHOST_OPACITY,
+} from "../../constants/guideOutlines";
 import { colors } from "../../styles/theme";
 
-export default function GuideOverlay({ template }) {
-  if (!template) return null;
+export default function GuideOverlay({ carModel, position, detections }) {
+  const model = CAR_MODELS[carModel];
+  const g = model?.outlines?.[position];
+  if (!g) return null;
+
+  const useGhost = GUIDE_CAR_STYLE === "ghost";
+  const ghostSrc = position.includes("front") ? model.ghost.front : model.ghost.rear;
+  const plateColor = detections?.license_plate?.aligned ? colors.success : "#ffffff";
+  const wheelColor = detections?.wheel?.aligned ? colors.success : "#ffffff";
+  const svgMirror = g.mirror ? `translate(${GUIDE_VIEWBOX.w},0) scale(-1,1)` : undefined;
+
   return (
-    <svg style={styles.overlay} preserveAspectRatio="none">
-      <rect
-        x={`${template.licensePlate.xMin}%`}
-        y={`${template.licensePlate.yMin}%`}
-        width={`${template.licensePlate.xMax - template.licensePlate.xMin}%`}
-        height={`${template.licensePlate.yMax - template.licensePlate.yMin}%`}
-        fill="none"
-        stroke={colors.guideStroke}
-        strokeWidth="2"
-        strokeDasharray="6,4"
-        strokeOpacity="0.6"
-      />
-      <rect
-        x={`${template.wheel.xMin}%`}
-        y={`${template.wheel.yMin}%`}
-        width={`${template.wheel.xMax - template.wheel.xMin}%`}
-        height={`${template.wheel.yMax - template.wheel.yMin}%`}
-        fill="none"
-        stroke={colors.guideStroke}
-        strokeWidth="2"
-        strokeDasharray="6,4"
-        strokeOpacity="0.6"
-      />
-    </svg>
+    <div style={styles.wrap}>
+      {useGhost && (
+        <img
+          src={ghostSrc}
+          alt=""
+          style={{
+            ...styles.ghost,
+            opacity: GHOST_OPACITY,
+            transform: g.mirror ? "scaleX(-1)" : "none",
+          }}
+        />
+      )}
+      <svg
+        style={styles.svg}
+        viewBox={`0 0 ${GUIDE_VIEWBOX.w} ${GUIDE_VIEWBOX.h}`}
+        preserveAspectRatio="none"
+      >
+        <g transform={svgMirror}>
+          {/* 車身外框線稿：兩種風格都畫（ghost 時疊在半透明車上更清楚） */}
+          <path d={g.car} fill="none" stroke="#ffffff" strokeWidth="3" strokeOpacity="0.5" />
+          <path
+            d={g.plate}
+            fill="none"
+            stroke={plateColor}
+            strokeWidth="4"
+            strokeOpacity="0.9"
+            strokeDasharray="8 5"
+          />
+          <path
+            d={g.wheel}
+            fill="none"
+            stroke={wheelColor}
+            strokeWidth="4"
+            strokeOpacity="0.9"
+            strokeDasharray="8 5"
+          />
+        </g>
+      </svg>
+    </div>
   );
 }
 
 const styles = {
-  overlay: {
+  wrap: {
     position: "absolute",
     top: 0,
     left: 0,
     width: "100%",
     height: "100%",
     pointerEvents: "none",
+  },
+  ghost: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+  },
+  svg: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
   },
 };

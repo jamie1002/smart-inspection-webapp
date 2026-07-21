@@ -8,7 +8,9 @@ export default function HintBanner({ items }) {
     <div style={styles.stack}>
       {items.map((item, i) => (
         <div key={i} style={styles.pill}>
-          {item.arrow && <DirectionArrow direction={item.arrow} />}
+          {(item.arrow || typeof item.angle === "number") && (
+            <DirectionArrow direction={item.arrow} angle={item.angle} />
+          )}
           <span>{item.text}</span>
         </div>
       ))}

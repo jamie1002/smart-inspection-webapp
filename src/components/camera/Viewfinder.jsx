@@ -12,6 +12,8 @@ import { colors, font, z } from "../../styles/theme";
 export default function Viewfinder({
   videoRef,
   template,
+  carModel,
+  position,
   positionIndex,
   completedCount,
   modelReady,
@@ -37,15 +39,16 @@ export default function Viewfinder({
   const showBlur = !isFlipped && orientationOk && !liveBlurOk;
   const showNeedsDetection = clear && needsDetection;
 
-  const moveItems = [];
-  if (clear && !needsDetection) {
-    if (distanceHint || horizontalHint) {
-      if (distanceHint) moveItems.push(distanceHint);
-      if (horizontalHint) moveItems.push(horizontalHint);
-    } else if (verticalHint) {
-      moveItems.push(verticalHint);
-    }
-  }
+  // 距離(前後)+左右 合併成單一斜向提示（往左後 / 往右前…）
+  const moveHint =
+    clear && !needsDetection && (distanceHint || horizontalHint)
+      ? buildMoveHint(distanceHint, horizontalHint)
+      : null;
+  // 上下置中：僅在前後/左右都通過時顯示
+  const verticalOnly =
+    clear && !needsDetection && !distanceHint && !horizontalHint && verticalHint
+      ? { text: verticalHint.text, arrow: verticalHint.arrow }
+      : null;
 
   const showStable =
     clear && !needsDetection && !distanceHint && !horizontalHint && !verticalHint && stableCountdownActive;
@@ -59,7 +62,7 @@ export default function Viewfinder({
       <div style={styles.viewfinder}>
         <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
 
-        <GuideOverlay template={template} />
+        <GuideOverlay carModel={carModel} position={position} detections={detections} />
         {IS_TEST_MODE && <DetectionOverlay detections={detections} />}
 
         {!modelReady && !modelError && <div style={styles.modelBadge}>模型載入中…</div>}
@@ -84,7 +87,8 @@ export default function Viewfinder({
 
         {showBlur && <HintBanner items={[{ text: "畫面模糊" }]} />}
         {showNeedsDetection && <HintBanner items={[{ text: "請將車牌與輪胎都置於畫面內" }]} />}
-        {moveItems.length > 0 && <HintBanner items={moveItems} />}
+        {moveHint && <HintBanner items={[moveHint]} />}
+        {verticalOnly && <HintBanner items={[verticalOnly]} />}
         {showStable && <HintBanner items={[{ text: "請保持不動" }]} />}
 
         {IS_TEST_MODE && (
@@ -106,6 +110,23 @@ export default function Viewfinder({
       </div>
     </div>
   );
+}
+
+// 合併「距離(前後)」與「左右」為單一斜向提示
+// 靠近(near)=前、後退(far)=後；文字順序：往 + 左/右 + 前/後（例：往左後）
+function buildMoveHint(distanceHint, horizontalHint) {
+  const v = distanceHint ? (distanceHint.arrow === "near" ? "front" : "back") : null;
+  const h = horizontalHint ? horizontalHint.arrow : null; // "left" | "right"
+
+  const hChar = h === "left" ? "左" : h === "right" ? "右" : "";
+  const vChar = v === "front" ? "前" : v === "back" ? "後" : "";
+  const text = `往${hChar}${vChar}`;
+
+  const dx = h === "left" ? -1 : h === "right" ? 1 : 0;
+  const dy = v === "front" ? -1 : v === "back" ? 1 : 0; // 螢幕座標 y 向下
+  const angle = (Math.atan2(dx, -dy) * 180) / Math.PI;
+
+  return { text, angle };
 }
 
 const styles = {

@@ -38,13 +38,14 @@ function deviceInfo() {
 }
 
 // 建立訂單（開始檢測時呼叫一次）
-export async function createRental({ sessionId, vehicleId, personnelName, plateInput, plateInputNormalized }) {
+export async function createRental({ sessionId, vehicleId, carModel, personnelName, plateInput, plateInputNormalized }) {
   await authReady;
   const rentalId = `Rental_${vehicleId}_${Date.now()}`;
   await setDoc(doc(db, RENTALS, rentalId), {
     rental_id: rentalId,
     session_id: sessionId,
     vehicle_id: vehicleId,
+    car_model: carModel ?? null,
     personnel_name: personnelName,
     plate_input: plateInput,
     plate_input_normalized: plateInputNormalized,
@@ -73,6 +74,7 @@ export async function uploadPhotoRecord(meta) {
     rentalId,
     sessionId,
     vehicleId,
+    carModel,
     personnelName,
     plateInput,
     plateInputNormalized,
@@ -110,6 +112,7 @@ export async function uploadPhotoRecord(meta) {
     rental_id: rentalId,
     session_id: sessionId,
     vehicle_id: vehicleId,
+    car_model: carModel ?? null,
     personnel_name: personnelName,
     plate_input: plateInput,
     plate_input_normalized: plateInputNormalized,

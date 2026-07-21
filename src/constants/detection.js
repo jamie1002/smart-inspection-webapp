@@ -51,7 +51,7 @@ export const BLUR_RELATIVE_RATIO = 0.5;
 // 位置/距離提示方向符號（實機校正值）
 // ============================================
 export const HORIZONTAL_HINT_SIGN = -1;
-export const VERTICAL_HINT_SIGN = 1;
+export const VERTICAL_HINT_SIGN = -1;
 
 // ============================================
 // 存檔輸出與顯示裁切

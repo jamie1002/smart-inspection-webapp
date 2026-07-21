@@ -7,6 +7,7 @@ import {
   POSITION_SEQUENCE,
   GUIDE_TEMPLATES,
 } from "../constants/guideTemplates";
+import { CAR_MODELS, DEFAULT_CAR_MODEL } from "../constants/carModels";
 import {
   MAX_OUTPUT_LONG_EDGE,
   ANALYZING_DURATION_MS,
@@ -60,7 +61,9 @@ export default function CameraFlow() {
 
   const [personnelName, setPersonnelName] = useState("");
   const [plateNumberInput, setPlateNumberInput] = useState("");
+  const [carModel, setCarModel] = useState(DEFAULT_CAR_MODEL);
 
+  const activeModel = CAR_MODELS[carModel];
   const currentPosition = POSITION_SEQUENCE[positionIndex];
   const template = GUIDE_TEMPLATES[currentPosition];
 
@@ -79,6 +82,7 @@ export default function CameraFlow() {
     modelReady,
     stage,
     currentPosition,
+    templates: activeModel.templates,
     videoRef,
     carModelRef,
     inputCanvasRef,
@@ -104,13 +108,14 @@ export default function CameraFlow() {
     createRental({
       sessionId: sessionIdRef.current,
       vehicleId,
+      carModel,
       personnelName,
       plateInput: plateNumberInput,
       plateInputNormalized: vehicleId,
     })
       .then((id) => { rentalIdRef.current = id; })
       .catch((err) => console.error("建立訂單失敗（可忽略，不擋流程）：", err));
-  }, [status, plateNumberInput, personnelName, sessionIdRef]);
+  }, [status, plateNumberInput, personnelName, carModel, sessionIdRef]);
 
   // ----- 輸入欄位 -----
   const handlePersonnelChange = useCallback((e) => {
@@ -211,6 +216,7 @@ export default function CameraFlow() {
         rentalId: rentalIdRef.current,
         sessionId: sessionIdRef.current,
         vehicleId: normalizedPlateNumber,
+        carModel,
         personnelName,
         plateInput: plateNumberInput,
         plateInputNormalized: normalizedPlateNumber,
@@ -233,7 +239,7 @@ export default function CameraFlow() {
       setPositionIndex(confirmedIndex + 1);
       setStage(FLOW_STAGE.SHOOTING);
     }
-  }, [previewPhoto, plateMismatch, positionIndex, ocrResult, normalizedPlateNumber, personnelName, plateNumberInput, sessionIdRef]);
+  }, [previewPhoto, plateMismatch, positionIndex, ocrResult, normalizedPlateNumber, personnelName, plateNumberInput, carModel, sessionIdRef]);
 
   const retakePhoto = useCallback(() => {
     retakeCountRef.current[currentPosition] = (retakeCountRef.current[currentPosition] || 0) + 1;
@@ -323,6 +329,8 @@ export default function CameraFlow() {
         status === CAMERA_STATUS.ERROR) && (
         <StartScreen
           status={status}
+          carModel={carModel}
+          onCarModelChange={(e) => setCarModel(e.target.value)}
           personnelName={personnelName}
           plateNumberInput={plateNumberInput}
           onPersonnelChange={handlePersonnelChange}
@@ -336,6 +344,8 @@ export default function CameraFlow() {
         <Viewfinder
           videoRef={videoRef}
           template={template}
+          carModel={carModel}
+          position={currentPosition}
           positionIndex={positionIndex}
           completedCount={capturedPhotos.length}
           modelReady={modelReady}

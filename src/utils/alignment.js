@@ -11,8 +11,9 @@ import {
 } from "../constants/detection";
 import { GUIDE_TEMPLATES, keyToTemplateField } from "../constants/guideTemplates";
 
-export function evaluateAlignment(rawResults, position) {
-  const template = GUIDE_TEMPLATES[position];
+// templates 參數可傳入所選車款的目標框；未傳時退回預設 GUIDE_TEMPLATES（Altis）
+export function evaluateAlignment(rawResults, position, templates = GUIDE_TEMPLATES) {
+  const template = templates[position];
   const evaluated = {};
 
   for (const key of Object.keys(rawResults)) {
@@ -45,8 +46,8 @@ export function evaluateAlignment(rawResults, position) {
   return evaluated;
 }
 
-export function evaluatePositionAndDistance(rawResults, position) {
-  const template = GUIDE_TEMPLATES[position];
+export function evaluatePositionAndDistance(rawResults, position, templates = GUIDE_TEMPLATES) {
+  const template = templates[position];
   if (!template) {
     return { distanceHint: null, horizontalHint: null, verticalHint: null, isFlipped: false, incomplete: false };
   }

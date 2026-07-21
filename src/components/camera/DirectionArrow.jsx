@@ -1,6 +1,15 @@
-// 方向箭頭 SVG（near/far 為前後雙箭頭，up/down/left/right 為單箭頭）
+// 方向箭頭 SVG
+// - direction: near/far（前後雙箭頭）、up/down/left/right（單箭頭）
+// - angle: 直接指定旋轉角度（度），用於合併後的斜向提示（往左後…）；優先於 direction
+export default function DirectionArrow({ direction, angle, color = "#fff", size = 24 }) {
+  if (typeof angle === "number") {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" style={{ transform: `rotate(${angle}deg)` }}>
+        <path d="M12 2 L20 18 L12 14 L4 18 Z" fill={color} />
+      </svg>
+    );
+  }
 
-export default function DirectionArrow({ direction, color = "#fff", size = 24 }) {
   if (direction === "near" || direction === "far") {
     const rotation = direction === "near" ? 0 : 180;
     return (
