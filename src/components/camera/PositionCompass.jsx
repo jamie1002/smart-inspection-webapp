@@ -21,7 +21,9 @@ export default function PositionCompass({ currentPosition, capturedByPosition, o
       {POSITION_SEQUENCE.map((position) => {
         const done = !!capturedByPosition?.[position];
         const current = position === currentPosition;
-        const state = done ? "done" : current ? "current" : "pending";
+        // current 優先於 done：重拍時該角度仍留在 capturedByPosition（舊照片未清除），
+        // 但畫面上正在重新拍攝，應顯示「進行中」而非誤判成「已完成」
+        const state = current ? "current" : done ? "done" : "pending";
         const borderColor =
           state === "current" ? colors.brand : state === "done" ? colors.success : colors.border;
         return (
@@ -48,7 +50,7 @@ export default function PositionCompass({ currentPosition, capturedByPosition, o
                   filter: state === "pending" ? "grayscale(1)" : "none",
                 }}
               />
-              {done && <span style={styles.check}>✓</span>}
+              {state === "done" && <span style={styles.check}>✓</span>}
             </div>
             <span
               style={{
