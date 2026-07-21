@@ -9,8 +9,8 @@
     "build:test": "vite build --mode test",
     "lint": "eslint .",
     "preview": "vite preview",
-    "deploy": "npm run build && gh-pages -d dist",
-    "deploy:test": "npm run build:test && gh-pages -d dist"
+    "deploy": "npm run build && vite build --mode test --outDir dist/test && gh-pages -d dist",
+    "deploy:test": "npm run deploy"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",

@@ -7,8 +7,19 @@
 - GitHub: `jamie1002/smart-inspection-webapp`（public，非 fork）
 - Remote URL: `https://github.com/jamie1002/smart-inspection-webapp.git`
 - 預設分支：`main`
-- 目前只有這一個分支，沒有 branch protection rule，沒有 `.github/workflows`（無 CI/CD）
+- `main` 之外還有一個 `gh-pages` 分支，僅供 `npm run deploy`（`gh-pages` npm 套件）自動
+  推送建置產物，**不要手動改這個分支的內容**，也不需要對它開 PR/review。
+- 沒有 branch protection rule，沒有 `.github/workflows`（無 CI/CD）
 - Collaborators：僅 `jamie1002` 一人
+
+## 部署（GitHub Pages）
+
+- `npm run deploy` 一次建正式版＋測試版兩份 bundle、合併進同一個 `dist/`、
+  推到 `gh-pages` 分支；GitHub Pages 設定為以 `gh-pages` 分支發布。
+- 部署後有三個同時可達的網址（一般＝正式版／`test/`＝測試版／`test/?debug`＝校正工具），
+  細節與歷史沿革見 `docs/00_前端專案總覽與規格書.md` §2、§9.7（曾經 `deploy`／
+  `deploy:test` 共用同一分支互相覆蓋，2026-07-22 已修正）。
+- `deploy:test` 現在只是 `deploy` 的別名，兩者行為完全相同。
 
 ## 本機環境
 
