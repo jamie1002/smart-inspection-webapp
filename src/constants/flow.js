@@ -5,6 +5,7 @@ export const FLOW_STAGE = {
   SHOOTING: "shooting",
   PREVIEW: "preview",
   ANALYZING: "analyzing",
+  ANALYSIS_DEBUG: "analysis_debug",
   REVIEW_INTRO: "review_intro",
   REVIEWING: "reviewing",
   DOWNLOAD_PROMPT: "download_prompt",

@@ -21,7 +21,7 @@ import { generateSessionId } from "../utils/session";
 import { trySharePhotos } from "../utils/share";
 import { getCurrentPositionSafe } from "../utils/geolocation";
 import { recognizePlateCharacters } from "../services/models";
-import { createRental, uploadPhotoRecord, markPickupUploaded } from "../services/upload";
+import { createRental, uploadBatchPhotosRecords, subscribeToRentalAnalysis } from "../services/upload";
 
 import { useCamera } from "../hooks/useCamera";
 import { useModels } from "../hooks/useModels";
@@ -34,12 +34,27 @@ import StartScreen from "./camera/StartScreen";
 import Viewfinder from "./camera/Viewfinder";
 import PreviewScreen from "./camera/PreviewScreen";
 import AnalyzingScreen from "./camera/AnalyzingScreen";
+import AnalysisDebugScreen from "./camera/AnalysisDebugScreen";
 import ReviewIntroScreen from "./camera/ReviewIntroScreen";
 import ReviewScreen from "./camera/ReviewScreen";
 import DownloadPromptScreen from "./camera/DownloadPromptScreen";
 import ManualSaveScreen from "./camera/ManualSaveScreen";
 import CompleteScreen from "./camera/CompleteScreen";
 import { colors } from "../styles/theme";
+
+function isPhotoReceived(photoData) {
+  if (!photoData) return false;
+  if (Array.isArray(photoData.damages)) return true;
+  const statusStr = String(
+    photoData.status || photoData.qc_status || photoData.analysis_result || ""
+  ).toLowerCase();
+  return (
+    statusStr === "none" ||
+    statusStr === "completed" ||
+    statusStr === "analyzed" ||
+    statusStr === "ai_completed"
+  );
+}
 
 export default function CameraFlow() {
   const inputCanvasRef = useRef(null);
@@ -61,6 +76,12 @@ export default function CameraFlow() {
   const [ocrChecking, setOcrChecking] = useState(false);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [isSharing, setIsSharing] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(40);
+
+  const receivedCount = useMemo(
+    () => POSITION_SEQUENCE.filter((p) => isPhotoReceived(capturedByPosition[p])).length,
+    [capturedByPosition]
+  );
 
   const [personnelName, setPersonnelName] = useState("");
   const [plateNumberInput, setPlateNumberInput] = useState("");
@@ -226,30 +247,21 @@ export default function CameraFlow() {
       return;
     }
 
-    const photo = { ...previewPhoto, ocrResult };
     const confirmedPosition = currentPosition;
     const meta = pendingMetaRef.current || {};
     const plateMatch = ocrResult ? ocrResult.text === normalizedPlateNumber : null;
 
+    const photo = { 
+        ...previewPhoto, 
+        ocrResult,
+        meta,
+        plateMatch,
+        position: confirmedPosition,
+        sequenceIndex: POSITION_INDEX[confirmedPosition]
+    };
+
     const updated = { ...capturedByPosition, [confirmedPosition]: photo };
     setCapturedByPosition(updated);
-
-    if (rentalIdRef.current) {
-      uploadPhotoRecord({
-        rentalId: rentalIdRef.current,
-        sessionId: sessionIdRef.current,
-        vehicleId: normalizedPlateNumber,
-        carModel,
-        personnelName,
-        plateInput: plateNumberInput,
-        plateInputNormalized: normalizedPlateNumber,
-        sequenceIndex: POSITION_INDEX[confirmedPosition],
-        dataUrl: photo.dataUrl,
-        plateOcr: ocrResult,
-        plateMatch,
-        ...meta,
-      }).catch((err) => console.error("上傳失敗（不擋流程）：", err));
-    }
 
     setPreviewPhoto(null);
     setOcrResult(null);
@@ -257,7 +269,27 @@ export default function CameraFlow() {
 
     const allDone = POSITION_SEQUENCE.every((p) => updated[p]);
     if (allDone) {
-      if (rentalIdRef.current) markPickupUploaded(rentalIdRef.current).catch(() => {});
+      if (rentalIdRef.current) {
+        const batchMetaList = POSITION_SEQUENCE.map((pos) => {
+          const item = updated[pos];
+          return {
+            rentalId: rentalIdRef.current,
+            sessionId: sessionIdRef.current,
+            vehicleId: normalizedPlateNumber,
+            carModel,
+            personnelName,
+            plateInput: plateNumberInput,
+            plateInputNormalized: normalizedPlateNumber,
+            sequenceIndex: POSITION_INDEX[pos],
+            position: pos,
+            dataUrl: item.dataUrl,
+            plateOcr: item.ocrResult,
+            plateMatch: item.plateMatch,
+            ...(item.meta || {}),
+          };
+        });
+        uploadBatchPhotosRecords(batchMetaList).catch((err) => console.error("上傳失敗（不擋流程）：", err));
+      }
       setStage(FLOW_STAGE.ANALYZING);
     } else {
       const next = POSITION_SEQUENCE.find((p) => !updated[p]);
@@ -290,11 +322,51 @@ export default function CameraFlow() {
     }
   }, [capturedByPosition]);
 
-  // ANALYZING → REVIEW_INTRO
+  // ANALYZING → 實時持續監聽 40 秒或四張照片全數收齊（有車損或 none）後，切換至 ANALYSIS_DEBUG 驗證頁
   useEffect(() => {
     if (stage !== FLOW_STAGE.ANALYZING) return;
-    const timerId = setTimeout(() => setStage(FLOW_STAGE.REVIEW_INTRO), ANALYZING_DURATION_MS);
-    return () => clearTimeout(timerId);
+
+    setSecondsLeft(40);
+    const countdownTimer = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(countdownTimer);
+          setStage(FLOW_STAGE.ANALYSIS_DEBUG);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    let unsub = () => {};
+    if (rentalIdRef.current) {
+      unsub = subscribeToRentalAnalysis(rentalIdRef.current, (update) => {
+        if (update.type === "photos" && update.photosMap) {
+          setCapturedByPosition((prev) => {
+            const next = { ...prev };
+            Object.keys(update.photosMap).forEach((pType) => {
+              const photoData = update.photosMap[pType];
+              if (next[pType]) {
+                next[pType] = { ...next[pType], ...photoData };
+              }
+            });
+
+            const allReceived = POSITION_SEQUENCE.every((p) => isPhotoReceived(next[p]));
+            if (allReceived) {
+              clearInterval(countdownTimer);
+              setStage(FLOW_STAGE.ANALYSIS_DEBUG);
+            }
+
+            return next;
+          });
+        }
+      });
+    }
+
+    return () => {
+      clearInterval(countdownTimer);
+      unsub();
+    };
   }, [stage]);
 
   const startReview = useCallback(() => {
@@ -431,7 +503,20 @@ export default function CameraFlow() {
         />
       )}
 
-      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.ANALYZING && <AnalyzingScreen />}
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.ANALYZING && (
+        <AnalyzingScreen
+          secondsLeft={secondsLeft}
+          receivedCount={receivedCount}
+          onSkip={() => setStage(FLOW_STAGE.ANALYSIS_DEBUG)}
+        />
+      )}
+
+      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.ANALYSIS_DEBUG && (
+        <AnalysisDebugScreen
+          capturedByPosition={capturedByPosition}
+          onNext={() => setStage(FLOW_STAGE.REVIEW_INTRO)}
+        />
+      )}
 
       {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.REVIEW_INTRO && (
         <ReviewIntroScreen onStart={startReview} />

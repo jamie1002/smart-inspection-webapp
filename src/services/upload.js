@@ -11,6 +11,9 @@ import {
   increment,
   serverTimestamp,
   Timestamp,
+  onSnapshot,
+  query,
+  where,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage, STORAGE_BUCKET, authReady, authError } from "../config/firebase";
@@ -173,4 +176,46 @@ export async function markPickupUploaded(rentalId) {
     status: "pickup_uploaded",
     completed_at: serverTimestamp(),
   });
+}
+
+// 四張拍完時一次並行上傳所有照片並標記訂單完成
+export async function uploadBatchPhotosRecords(photosList) {
+  assertAuthReady();
+  await authReady;
+  if (!photosList || photosList.length === 0) return;
+
+  await Promise.all(photosList.map((meta) => uploadPhotoRecord(meta)));
+
+  const rentalId = photosList[0]?.rentalId;
+  if (rentalId) {
+    await markPickupUploaded(rentalId);
+  }
+}
+
+// 實時監聽後端 AI 車損座標回填
+export function subscribeToRentalAnalysis(rentalId, onUpdate) {
+  if (!rentalId) return () => {};
+
+  const unsubRental = onSnapshot(doc(db, RENTALS, rentalId), (docSnap) => {
+    if (docSnap.exists()) {
+      onUpdate({ type: "rental", data: docSnap.data() });
+    }
+  });
+
+  const q = query(collection(db, PHOTOS), where("rental_id", "==", rentalId));
+  const unsubPhotos = onSnapshot(q, (querySnap) => {
+    const photosMap = {};
+    querySnap.forEach((docSnap) => {
+      const pData = docSnap.data();
+      if (pData.photo_type) {
+        photosMap[pData.photo_type] = pData;
+      }
+    });
+    onUpdate({ type: "photos", photosMap });
+  });
+
+  return () => {
+    unsubRental();
+    unsubPhotos();
+  };
 }
