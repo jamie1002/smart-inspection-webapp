@@ -8,8 +8,8 @@ export const MODEL_URL = `${import.meta.env.BASE_URL}model/model.json`;
 export const CLASS_NAMES = ["license_plate", "wheel"];
 export const CONFIDENCE_THRESHOLD = 0.25;
 export const INFERENCE_INTERVAL_MS = 150;
-export const POSITION_TOLERANCE_PERCENT = 5;
-export const AREA_TOLERANCE_RATIO = 0.1;
+export const POSITION_TOLERANCE_PERCENT = 20;
+export const AREA_TOLERANCE_RATIO = 0.2;
 
 // ============================================
 // 車牌字元辨識模型（33 類）
@@ -22,7 +22,7 @@ export const CHAR_CLASS_NAMES = [
 ];
 export const CHAR_CONFIDENCE_THRESHOLD = 0.6;
 export const CHAR_NMS_IOU_THRESHOLD = 0.3;
-export const CHAR_CROP_PADDING_PERCENT = 10;
+export const CHAR_CROP_PADDING_PERCENT = 20;
 // 車牌裁切最小外擴（單位：畫面寬/高的百分點，非框自身比例）。
 // 原因：9:16 因裁切高度較大，車體定位模型前處理需把畫面等比縮進固定 640×640，
 // 縮放係數 = 640/max(cropW,cropH) 明顯小於 3:4，車牌在偵測輸入影像中的實際像素變小、

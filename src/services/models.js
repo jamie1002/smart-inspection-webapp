@@ -67,46 +67,48 @@ function preprocessForDetection(video, canvas, cropRatio) {
 // 車體定位：回傳 { license_plate:{conf,xMinPct,...}, wheel:{...} }（百分比座標）
 // cropRatio：目前選定的取景比例（3:4 或 9:16 的 w/h），未傳時 preprocessForDetection
 // 會再退回 computeDisplayCropGeometry 的預設值（9:16，向下相容）。
-export function runCarDetection(video, model, canvas, cropRatio) {
+export async function runCarDetection(video, model, canvas, cropRatio) {
     const { cropW, cropH, scale, padLeft, padTop } = preprocessForDetection(video, canvas, cropRatio);
 
-    return tf.tidy(() => {
+    const parsedTensor = tf.tidy(() => {
         const inputTensor = tf.browser.fromPixels(canvas).toFloat().div(255.0).expandDims(0);
         const output = model.execute(inputTensor);
-        const parsed = output.squeeze([0]).transpose([1, 0]);
-        const data = parsed.arraySync();
+        return output.squeeze([0]).transpose([1, 0]);
+    });
 
-        const rawResults = {};
-        for (let classId = 0; classId < CLASS_NAMES.length; classId++) {
-            let best = null;
-            for (let i = 0; i < data.length; i++) {
-                const conf = data[i][4 + classId];
-                if (conf > CONFIDENCE_THRESHOLD && (!best || conf > best.conf)) {
-                    best = { conf, cx: data[i][0], cy: data[i][1], w: data[i][2], h: data[i][3] };
-                }
-            }
-            if (best) {
-                const x1 = best.cx - best.w / 2;
-                const y1 = best.cy - best.h / 2;
-                const x2 = best.cx + best.w / 2;
-                const y2 = best.cy + best.h / 2;
+    const data = await parsedTensor.array();
+    parsedTensor.dispose();
 
-                const cropX1 = (x1 - padLeft) / scale;
-                const cropY1 = (y1 - padTop) / scale;
-                const cropX2 = (x2 - padLeft) / scale;
-                const cropY2 = (y2 - padTop) / scale;
-
-                rawResults[CLASS_NAMES[classId]] = {
-                    conf: best.conf,
-                    xMinPct: (cropX1 / cropW) * 100,
-                    xMaxPct: (cropX2 / cropW) * 100,
-                    yMinPct: (cropY1 / cropH) * 100,
-                    yMaxPct: (cropY2 / cropH) * 100,
-                };
+    const rawResults = {};
+    for (let classId = 0; classId < CLASS_NAMES.length; classId++) {
+        let best = null;
+        for (let i = 0; i < data.length; i++) {
+            const conf = data[i][4 + classId];
+            if (conf > CONFIDENCE_THRESHOLD && (!best || conf > best.conf)) {
+                best = { conf, cx: data[i][0], cy: data[i][1], w: data[i][2], h: data[i][3] };
             }
         }
-        return rawResults;
-    });
+        if (best) {
+            const x1 = best.cx - best.w / 2;
+            const y1 = best.cy - best.h / 2;
+            const x2 = best.cx + best.w / 2;
+            const y2 = best.cy + best.h / 2;
+
+            const cropX1 = (x1 - padLeft) / scale;
+            const cropY1 = (y1 - padTop) / scale;
+            const cropX2 = (x2 - padLeft) / scale;
+            const cropY2 = (y2 - padTop) / scale;
+
+            rawResults[CLASS_NAMES[classId]] = {
+                conf: best.conf,
+                xMinPct: (cropX1 / cropW) * 100,
+                xMaxPct: (cropX2 / cropW) * 100,
+                yMinPct: (cropY1 / cropH) * 100,
+                yMaxPct: (cropY2 / cropH) * 100,
+            };
+        }
+    }
+    return rawResults;
 }
 
 // 車牌字元辨識：回傳 { text, confidence } 或 null

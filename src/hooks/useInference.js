@@ -18,33 +18,43 @@ export function useInference({
     inputCanvasRef,
     orientationOkRef,
 }) {
-    const [detections, setDetections] = useState({});
-    const [needsDetection, setNeedsDetection] = useState(true);
-    const [distanceHint, setDistanceHint] = useState(null);
-    const [horizontalHint, setHorizontalHint] = useState(null);
-    const [verticalHint, setVerticalHint] = useState(null);
-    const [isFlipped, setIsFlipped] = useState(false);
+    const [inferenceState, setInferenceState] = useState({
+        detections: {},
+        needsDetection: true,
+        distanceHint: null,
+        horizontalHint: null,
+        verticalHint: null,
+        isFlipped: false,
+    });
 
     const detectionsRef = useRef({});
     const stageRef = useRef(stage);
     const intervalRef = useRef(null);
+    const isInferringRef = useRef(false);
 
     useEffect(() => {
-        detectionsRef.current = detections;
-    }, [detections]);
+        detectionsRef.current = inferenceState.detections;
+    }, [inferenceState.detections]);
 
     useEffect(() => {
         stageRef.current = stage;
     }, [stage]);
 
-    const runInference = useCallback(() => {
+    const runInference = useCallback(async () => {
+        if (isInferringRef.current) return;
+
         if (!orientationOkRef.current || stageRef.current !== FLOW_STAGE.SHOOTING) {
-            setDetections({});
-            setDistanceHint(null);
-            setHorizontalHint(null);
-            setVerticalHint(null);
-            setIsFlipped(false);
-            setNeedsDetection(true);
+            setInferenceState((prev) => {
+                if (!prev.needsDetection && Object.keys(prev.detections).length === 0) return prev;
+                return {
+                    detections: {},
+                    needsDetection: true,
+                    distanceHint: null,
+                    horizontalHint: null,
+                    verticalHint: null,
+                    isFlipped: false,
+                };
+            });
             return;
         }
 
@@ -54,17 +64,29 @@ export function useInference({
         if (!video || !model || !canvas || video.readyState < 2) return;
         if (!video.videoWidth || !video.videoHeight) return;
 
-        const rawResults = runCarDetection(video, model, canvas, cropRatio);
+        isInferringRef.current = true;
+        try {
+            const rawResults = await runCarDetection(video, model, canvas, cropRatio);
 
-        setDetections(evaluateAlignment(rawResults, currentPosition, templates));
+            if (stageRef.current !== FLOW_STAGE.SHOOTING) return;
 
-        const { distanceHint, horizontalHint, verticalHint, isFlipped, incomplete } =
-            evaluatePositionAndDistance(rawResults, currentPosition, templates);
-        setDistanceHint(distanceHint);
-        setHorizontalHint(horizontalHint);
-        setVerticalHint(verticalHint);
-        setIsFlipped(isFlipped);
-        setNeedsDetection(incomplete);
+            const newDetections = evaluateAlignment(rawResults, currentPosition, templates);
+            const { distanceHint, horizontalHint, verticalHint, isFlipped, incomplete } =
+                evaluatePositionAndDistance(rawResults, currentPosition, templates);
+
+            setInferenceState({
+                detections: newDetections,
+                needsDetection: incomplete,
+                distanceHint,
+                horizontalHint,
+                verticalHint,
+                isFlipped,
+            });
+        } catch (err) {
+            console.error("推論過程中發生錯誤：", err);
+        } finally {
+            isInferringRef.current = false;
+        }
     }, [currentPosition, templates, cropRatio, videoRef, carModelRef, inputCanvasRef, orientationOkRef]);
 
     useEffect(() => {
@@ -74,12 +96,12 @@ export function useInference({
     }, [status, modelReady, stage, runInference]);
 
     return {
-        detections,
+        detections: inferenceState.detections,
         detectionsRef,
-        needsDetection,
-        distanceHint,
-        horizontalHint,
-        verticalHint,
-        isFlipped,
+        needsDetection: inferenceState.needsDetection,
+        distanceHint: inferenceState.distanceHint,
+        horizontalHint: inferenceState.horizontalHint,
+        verticalHint: inferenceState.verticalHint,
+        isFlipped: inferenceState.isFlipped,
     };
 }

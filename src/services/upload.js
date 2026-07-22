@@ -17,8 +17,8 @@ import { db, storage, STORAGE_BUCKET, authReady, authError } from "../config/fir
 import { IS_TEST_MODE, APP_MODE, APP_VERSION, MODEL_VERSION } from "../config/appConfig";
 import { POSITION_TO_PHOTO_TYPE } from "../constants/guideTemplates";
 
-const RENTALS = IS_TEST_MODE ? "rentals_test" : "rentals";
-const PHOTOS = IS_TEST_MODE ? "photos_test" : "photos";
+const RENTALS = "rentals";
+const PHOTOS = "photos";
 
 function dataUrlToBlob(dataUrl) {
   const [head, body] = dataUrl.split(",");
