@@ -101,6 +101,10 @@ export async function runCarDetection(video, model, canvas, cropRatio) {
 
             rawResults[CLASS_NAMES[classId]] = {
                 conf: best.conf,
+                x1: cropX1 / cropW,
+                x2: cropX2 / cropW,
+                y1: cropY1 / cropH,
+                y2: cropY2 / cropH,
                 xMinPct: (cropX1 / cropW) * 100,
                 xMaxPct: (cropX2 / cropW) * 100,
                 yMinPct: (cropY1 / cropH) * 100,

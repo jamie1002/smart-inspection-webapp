@@ -30,21 +30,21 @@ export default function AnalysisDebugScreen({ capturedByPosition, onNext }) {
         {POSITION_SEQUENCE.map((pos) => {
           const item = capturedByPosition[pos];
           const label = GUIDE_TEMPLATES[pos]?.label || pos;
-          const damages = item?.damages || [];
-          const imgW = item?.imageWidth || item?.meta?.imageWidth || 1920;
-          const imgH = item?.imageHeight || item?.meta?.imageHeight || 1920;
+          const damages = Array.isArray(item?.damages) ? item.damages : [];
+          const imgW = item?.image_width || item?.imageWidth || item?.meta?.imageWidth || 1920;
+          const imgH = item?.image_height || item?.imageHeight || item?.meta?.imageHeight || 1920;
 
           return (
             <div key={pos} style={styles.card}>
               <div style={styles.cardHeader}>
                 <span style={styles.posName}>{label} ({pos})</span>
                 <span style={damages.length > 0 ? styles.damageCount : styles.zeroCount}>
-                  {damages.length > 0 ? `收到 ${damages.length} 筆車損` : "無車損記錄"}
+                  {damages.length > 0 ? `收到 ${damages.length} 筆車損` : "無車損 (0筆 / null)"}
                 </span>
               </div>
 
               {damages.length === 0 ? (
-                <div style={styles.emptyText}>後端未傳回此角度的車損</div>
+                <div style={styles.emptyText}>後端未傳回或標記此角度無車損 (damages: {item?.damages === null ? "null" : "[]"})</div>
               ) : (
                 damages.map((d, idx) => {
                   const labelText = DAMAGE_LABEL_MAP[d.label] || d.label;

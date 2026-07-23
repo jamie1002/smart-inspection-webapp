@@ -22,6 +22,14 @@ export const POSITION_TO_PHOTO_TYPE = {
   right_front: "front_right",
 };
 
+// 資料庫標準 photo_type → 內部 position
+export const PHOTO_TYPE_TO_POSITION = {
+  front_left: "front_left",
+  rear_left: "left_rear",
+  rear_right: "right_rear",
+  front_right: "right_front",
+};
+
 // 內部 position → 固定序號（自由順序拍攝時，序號與拍攝順序無關，永遠對應同一角度）
 export const POSITION_INDEX = {
   front_left: 0,

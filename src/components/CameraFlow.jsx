@@ -8,6 +8,7 @@ import {
   POSITION_SEQUENCE,
   POSITION_INDEX,
   GUIDE_TEMPLATES,
+  PHOTO_TYPE_TO_POSITION,
 } from "../constants/guideTemplates";
 import { CAR_MODELS, DEFAULT_CAR_MODEL } from "../constants/carModels";
 import { ASPECT_RATIOS, DEFAULT_ASPECT_RATIO } from "../constants/aspectRatios";
@@ -44,7 +45,11 @@ import { colors } from "../styles/theme";
 
 function isPhotoReceived(photoData) {
   if (!photoData) return false;
-  if (Array.isArray(photoData.damages)) return true;
+  // 1. 若 damages 陣列有內容 (長度 > 0，即有車損座標資訊)
+  if (Array.isArray(photoData.damages) && photoData.damages.length > 0) {
+    return true;
+  }
+  // 2. 若 damages 為空陣列或 null，需確認狀態已明確標記為完成 (非 pending)
   const statusStr = String(
     photoData.status || photoData.qc_status || photoData.analysis_result || ""
   ).toLowerCase();
@@ -346,8 +351,17 @@ export default function CameraFlow() {
             const next = { ...prev };
             Object.keys(update.photosMap).forEach((pType) => {
               const photoData = update.photosMap[pType];
-              if (next[pType]) {
-                next[pType] = { ...next[pType], ...photoData };
+              let targetPosKey = POSITION_SEQUENCE.find(
+                (posKey) =>
+                  (next[posKey]?.fileName && next[posKey]?.fileName === photoData.file_name) ||
+                  (next[posKey]?.file_name && next[posKey]?.file_name === photoData.file_name)
+              );
+              if (!targetPosKey) {
+                targetPosKey = PHOTO_TYPE_TO_POSITION[pType] || pType;
+              }
+
+              if (next[targetPosKey]) {
+                next[targetPosKey] = { ...next[targetPosKey], ...photoData };
               }
             });
 
