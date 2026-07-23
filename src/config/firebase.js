@@ -8,7 +8,7 @@ import { getStorage } from "firebase/storage";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBsaJiIhPqTtwBf8n-M5aH-9Yz1M38qBJ8",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
   authDomain: "ai-car-inspection-system.firebaseapp.com",
   projectId: "ai-car-inspection-system",
   storageBucket: "ai-car-inspection-system.firebasestorage.app",

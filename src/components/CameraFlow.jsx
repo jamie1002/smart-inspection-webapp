@@ -555,11 +555,11 @@ export default function CameraFlow() {
       )}
 
       {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.MANUAL_SAVE && (
-        <ManualSaveScreen photos={capturedPhotos} onDone={() => setStage(FLOW_STAGE.COMPLETE)} />
+        <ManualSaveScreen photos={capturedPhotos} cropRatio={cropRatio} onDone={() => setStage(FLOW_STAGE.COMPLETE)} />
       )}
 
       {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.COMPLETE && (
-        <CompleteScreen photos={capturedPhotos} onBackToStart={backToStart} onRestart={resetFlow} />
+        <CompleteScreen photos={capturedPhotos} cropRatio={cropRatio} onBackToStart={backToStart} onRestart={resetFlow} />
       )}
     </div>
   );
