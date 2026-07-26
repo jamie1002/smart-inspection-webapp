@@ -8,8 +8,8 @@ export const MODEL_URL = `${import.meta.env.BASE_URL}model/model.json`;
 export const CLASS_NAMES = ["license_plate", "wheel"];
 export const CONFIDENCE_THRESHOLD = 0.25;
 export const INFERENCE_INTERVAL_MS = 150;
-export const POSITION_TOLERANCE_PERCENT = 20;
-export const AREA_TOLERANCE_RATIO = 0.2;
+export const POSITION_TOLERANCE_PERCENT = 10;
+export const AREA_TOLERANCE_RATIO = 0.1;
 
 // ============================================
 // 車牌字元辨識模型（33 類）

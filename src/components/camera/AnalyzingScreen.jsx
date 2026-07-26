@@ -1,20 +1,21 @@
 // 分析中（ANALYZING）：實時持續監聽 40 秒或全數收齊
+// onSkip 由 CameraFlow 依 IS_TEST_MODE 決定是否傳入：測試版才提供「直接進入車損確認」捷徑
 import { colors, space, font, radius } from "../../styles/theme";
 
 export default function AnalyzingScreen({ secondsLeft = 40, receivedCount = 0, onSkip }) {
   return (
     <div style={styles.center}>
-      <div style={styles.spinner} />
-      <p style={styles.text}>後端 AI 分析車損中…</p>
+      <div style={styles.spinnerWrap}>
+        <div style={styles.spinner} />
+        <span style={styles.spinnerCount}>{secondsLeft}</span>
+      </div>
+      <p style={styles.text}>AI 分析中</p>
 
       <div style={styles.statusBox}>
-        <p style={styles.timerText}>實時持續監聽剩餘：<span style={styles.highlight}>{secondsLeft} 秒</span></p>
-        <p style={styles.progressText}>四方位照片收集進度：<span style={styles.highlight}>{receivedCount} / 4</span> 張</p>
+        <p style={styles.progressText}>
+          分析完成:<span style={styles.highlight}>{receivedCount}/4</span>張
+        </p>
       </div>
-
-      <p style={styles.subtext}>
-        照片已同步上傳至 Firebase，將持續接收 40 秒或等四張照片皆收齊 AI 回覆（車損座標或 none）後跳轉。
-      </p>
 
       {onSkip && (
         <button style={styles.skipBtn} onClick={onSkip}>
@@ -41,13 +42,27 @@ const styles = {
     padding: space.lg,
     boxSizing: "border-box",
   },
+  spinnerWrap: {
+    position: "relative",
+    width: 56,
+    height: 56,
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+  },
   spinner: {
-    width: 48,
-    height: 48,
+    position: "absolute",
+    inset: 0,
     borderRadius: "50%",
     border: `4px solid ${colors.border}`,
     borderTopColor: colors.brand,
     animation: "spin 0.9s linear infinite",
+  },
+  spinnerCount: {
+    position: "relative",
+    color: "#ff4d4f",
+    fontWeight: 700,
+    fontSize: font.sm,
   },
   text: { color: "#fff", fontSize: font.lg, fontWeight: 700, textAlign: "center", maxWidth: 320, lineHeight: 1.6 },
   statusBox: {
@@ -58,10 +73,8 @@ const styles = {
     textAlign: "center",
     margin: "4px 0",
   },
-  timerText: { color: colors.textSecondary, fontSize: font.sm, margin: "2px 0" },
   progressText: { color: colors.textSecondary, fontSize: font.sm, margin: "2px 0" },
   highlight: { color: "#ff4d4f", fontWeight: 700, fontSize: font.md },
-  subtext: { color: colors.textSecondary, fontSize: font.xs, textAlign: "center", maxWidth: 320, lineHeight: 1.5 },
   skipBtn: {
     marginTop: space.md,
     padding: "8px 18px",

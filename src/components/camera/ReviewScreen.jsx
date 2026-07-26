@@ -1,6 +1,7 @@
 // 逐張車損比對（REVIEWING）：動態計算照片實際渲染框 (包含 Letterbox 留白扣除)
 import { useState, useRef, useEffect, useCallback } from "react";
 import { colors, font, radius, primaryButton } from "../../styles/theme";
+import { IS_TEST_MODE } from "../../config/appConfig";
 
 const DAMAGE_LABEL_MAP = {
   scratch: "刮痕",
@@ -102,7 +103,7 @@ export default function ReviewScreen({ reviewPhoto, positionLabel, reviewIndex, 
               const h = Math.max(0.5, yMax - yMin);
 
               const labelName = DAMAGE_LABEL_MAP[item.label] || item.label || "車損";
-              const confPct = item.confidence ? Math.round(item.confidence * 100) : null;
+              const confPct = IS_TEST_MODE && item.confidence ? Math.round(item.confidence * 100) : null;
               const labelText = confPct ? `${labelName} ${confPct}%` : labelName;
 
               return (

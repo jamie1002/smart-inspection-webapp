@@ -336,7 +336,7 @@ export default function CameraFlow() {
       setSecondsLeft((prev) => {
         if (prev <= 1) {
           clearInterval(countdownTimer);
-          setStage(FLOW_STAGE.ANALYSIS_DEBUG);
+          setStage(IS_TEST_MODE ? FLOW_STAGE.ANALYSIS_DEBUG : FLOW_STAGE.REVIEW_INTRO);
           return 0;
         }
         return prev - 1;
@@ -368,7 +368,7 @@ export default function CameraFlow() {
             const allReceived = POSITION_SEQUENCE.every((p) => isPhotoReceived(next[p]));
             if (allReceived) {
               clearInterval(countdownTimer);
-              setStage(FLOW_STAGE.ANALYSIS_DEBUG);
+              setStage(IS_TEST_MODE ? FLOW_STAGE.ANALYSIS_DEBUG : FLOW_STAGE.REVIEW_INTRO);
             }
 
             return next;
@@ -521,11 +521,11 @@ export default function CameraFlow() {
         <AnalyzingScreen
           secondsLeft={secondsLeft}
           receivedCount={receivedCount}
-          onSkip={() => setStage(FLOW_STAGE.ANALYSIS_DEBUG)}
+          onSkip={IS_TEST_MODE ? () => setStage(FLOW_STAGE.ANALYSIS_DEBUG) : undefined}
         />
       )}
 
-      {status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.ANALYSIS_DEBUG && (
+      {IS_TEST_MODE && status === CAMERA_STATUS.GRANTED && stage === FLOW_STAGE.ANALYSIS_DEBUG && (
         <AnalysisDebugScreen
           capturedByPosition={capturedByPosition}
           onNext={() => setStage(FLOW_STAGE.REVIEW_INTRO)}

@@ -1,5 +1,6 @@
 // 四方位縮圖元件（支援動態比例 3:4 / 9:16 與 AI 車損 SVG 重疊標註）
 import { colors, radius, font } from "../../styles/theme";
+import { IS_TEST_MODE } from "../../config/appConfig";
 
 const DAMAGE_LABEL_MAP = {
   scratch: "刮痕",
@@ -52,7 +53,7 @@ export default function DamageThumbnail({ photo, positionLabel, cropRatio = "9:1
             const h = Math.max(1, yMax - yMin);
 
             const labelName = DAMAGE_LABEL_MAP[item.label] || item.label || "車損";
-            const confPct = item.confidence ? Math.round(item.confidence * 100) : null;
+            const confPct = IS_TEST_MODE && item.confidence ? Math.round(item.confidence * 100) : null;
             const labelText = confPct ? `${labelName} ${confPct}%` : labelName;
 
             return (
